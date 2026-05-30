@@ -18,12 +18,16 @@ TRELLO_BASE = "https://api.trello.com/1"
 TZ = pytz.timezone("Asia/Bangkok")
 NOTIFY_TIMES = [(10, 30), (12, 30), (18, 30)]  # ชั่วโมง, นาที
  
-def get_lists():
+def _get_lists_sync():
     r = requests.get(f"{TRELLO_BASE}/boards/{TRELLO_BOARD_ID}/lists",
                      params={"key": TRELLO_API_KEY, "token": TRELLO_TOKEN})
     return {lst["name"]: lst["id"] for lst in r.json()}
  
-def find_card(name):
+async def get_lists():
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _get_lists_sync)
+ 
+def _find_card_sync(name):
     r = requests.get(f"{TRELLO_BASE}/boards/{TRELLO_BOARD_ID}/cards",
                      params={"key": TRELLO_API_KEY, "token": TRELLO_TOKEN})
     cards = r.json()
@@ -31,17 +35,25 @@ def find_card(name):
     exact = [c for c in cards if c["name"].lower() == name_lower]
     if exact:
         return exact[0]
-    partial = [c for c in cards if name_lower in c["name"].lower()]
-    return partial[0] if partial else None
+    matched = [c for c in cards if name_lower in c["name"].lower()]
+    return matched[0] if matched else None
  
-def move_card(card_id, list_id):
+async def find_card(name):
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, partial(_find_card_sync, name))
+ 
+def _move_card_sync(card_id, list_id):
     r = requests.put(f"{TRELLO_BASE}/cards/{card_id}",
                      params={"key": TRELLO_API_KEY, "token": TRELLO_TOKEN},
                      json={"idList": list_id})
     return r.json()
  
-def get_active_cards():
-    lists = get_lists()
+async def move_card(card_id, list_id):
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, partial(_move_card_sync, card_id, list_id))
+ 
+async def get_active_cards():
+    lists = await get_lists()
     done_ids = {v for k, v in lists.items() if "เสร็จ" in k}
     r = requests.get(f"{TRELLO_BASE}/boards/{TRELLO_BOARD_ID}/cards",
                      params={"key": TRELLO_API_KEY, "token": TRELLO_TOKEN})
@@ -94,7 +106,7 @@ tree = app_commands.CommandTree(client)
 async def status_command(interaction: discord.Interaction):
     await interaction.response.defer()
     try:
-        active = get_active_cards()
+        active = await get_active_cards()
         embed = discord.Embed(title="📋 สรุปงานทีมตอนนี้",
                               color=0x7F77DD,
                               timestamp=datetime.now(TZ))
@@ -119,7 +131,7 @@ async def deadline_alert():
             now = datetime.now(TZ)
             r = requests.get(f"{TRELLO_BASE}/boards/{TRELLO_BOARD_ID}/cards",
                              params={"key": TRELLO_API_KEY, "token": TRELLO_TOKEN})
-            lists = get_lists()
+            lists = await get_lists()
             done_ids = {v for k, v in lists.items() if "เสร็จ" in k}
             list_id_to_name = {v: k for k, v in lists.items()}
  
@@ -166,7 +178,7 @@ async def daily_notify():
         for h, mn in NOTIFY_TIMES:
             if now.hour == h and now.minute == mn:
                 try:
-                    active = get_active_cards()
+                    active = await get_active_cards()
                     embed = discord.Embed(
                         title=f"⏰ อัปเดตงานทีม — {now.strftime('%-H:%M น.')}",
                         color=0xBA7517,
@@ -279,7 +291,7 @@ class TimeSelectView(discord.ui.View):
         await interaction.response.defer()
         ctx = self.ctx
         try:
-            lists = get_lists()
+            lists = await get_lists()
             if ctx["member"] not in lists:
                 await interaction.followup.send(f"❌ ไม่พบ list ของ {ctx['member']}")
                 return
@@ -465,12 +477,12 @@ class StatusChoiceView(discord.ui.View):
     async def btn_done(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         try:
-            lists = get_lists()
+            lists = await get_lists()
             target = next((v for k, v in lists.items() if "เสร็จ" in k), None)
             if not target:
                 await interaction.followup.send("❌ ไม่พบ list เสร็จแล้ว")
                 return
-            move_card(self.card_id, target)
+            await move_card(self.card_id, target)
             await interaction.followup.edit_message(
                 interaction.message.id,
                 content=f"✅ **{self.card_name}** → เสร็จแล้ว! 🎉",
@@ -495,7 +507,7 @@ class MemberForStatusSelect(discord.ui.Select):
  
     async def callback(self, interaction: discord.Interaction):
         member = self.values[0]
-        lists = get_lists()
+        lists = await get_lists()
         done_ids = {v for k, v in lists.items() if "เสร็จ" in k}
         list_id_to_name = {v: k for k, v in lists.items()}
         r = requests.get(f"{TRELLO_BASE}/boards/{TRELLO_BOARD_ID}/cards",
