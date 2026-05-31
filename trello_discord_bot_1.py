@@ -2,6 +2,7 @@ import discord
 from discord import app_commands
 import requests
 import asyncio
+from functools import partial
 from datetime import datetime
 import pytz
 
