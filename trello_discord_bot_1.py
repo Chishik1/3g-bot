@@ -16,7 +16,7 @@ NOTIFY_CHANNEL_ID = int(os.environ["NOTIFY_CHANNEL_ID"])
 # ==========================
 TRELLO_BASE = "https://api.trello.com/1"
 TZ = pytz.timezone("Asia/Bangkok")
-NOTIFY_TIMES = [(10, 30), (12, 30), (21, 17)]  # ชั่วโมง, นาที
+NOTIFY_TIMES = [(10, 30), (12, 30), (17, 30)]  # ชั่วโมง, นาที
  
 def _get_lists_sync():
     r = requests.get(f"{TRELLO_BASE}/boards/{TRELLO_BOARD_ID}/lists",
