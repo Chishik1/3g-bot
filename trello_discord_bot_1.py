@@ -103,16 +103,16 @@ intents = discord.Intents.default()
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
  
-@tree.command(name="status", description="ดูสรุปงานของทีมตอนนี้")
+@tree.command(name="status", description="ดูสรุปงานของพวกมึงตอนนี้")
 async def status_command(interaction: discord.Interaction):
     await interaction.response.defer()
     try:
         active = await get_active_cards()
-        embed = discord.Embed(title="📋 สรุปงานทีมตอนนี้",
+        embed = discord.Embed(title="📋 สรุปงานพวกมึงตอนนี้",
                               color=0x7F77DD,
                               timestamp=datetime.now(TZ))
         if not active:
-            embed.description = "ไม่มีงานค้างอยู่ในขณะนี้ 🎉"
+            embed.description = "ไม่มีงานค้างไอสัส ดีมาก 🎉"
         else:
             avatars = {"โดม": "🟣", "ไอซ์": "🟢", "พี": "🟡", "3ก": "🔵"}
             for member, cards in active.items():
@@ -152,7 +152,7 @@ async def deadline_alert():
                     member = next((m for m in ["โดม", "ไอซ์", "พี", "3ก"] if m in list_name), "ทีม")
                     avatars = {"โดม": "🟣", "ไอซ์": "🟢", "พี": "🟡", "3ก": "🔵"}
  
-                    embed = discord.Embed(title="🚨 ใกล้ถึง Deadline แล้ว!", color=0xE24B4A, timestamp=now)
+                    embed = discord.Embed(title="🚨 ใกล้ถึง Deadline ไอ้สัสโฟกัสหน่อยๆ!", color=0xE24B4A, timestamp=now)
                     embed.add_field(name="งาน", value=card["name"], inline=False)
                     embed.add_field(name="ผู้รับผิดชอบ", value=f"{avatars.get(member,'')} {member}", inline=True)
                     embed.add_field(name="เหลือเวลา", value=f"⏳ {int(diff_hours)} ชั่วโมง", inline=True)
