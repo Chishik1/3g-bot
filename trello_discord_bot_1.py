@@ -741,6 +741,413 @@ async def morning_dm():
                     print(f"morning dm error ({member}): {e}")
         await asyncio.sleep(30)
 
+# ══════════════════════════════════════════════════════════════════
+# /overdue — โชว์งานที่เลยกำหนดแล้วยังไม่เสร็จ
+# ══════════════════════════════════════════════════════════════════
+
+@tree.command(name="overdue", description="ดูงานที่เลยกำหนดแล้วแต่ยังไม่เสร็จ")
+async def overdue_command(interaction: discord.Interaction):
+    await interaction.response.defer()
+    try:
+        lists = await get_lists()
+        done_ids = {v for k, v in lists.items() if "เสร็จ" in k}
+        list_id_to_name = {v: k for k, v in lists.items()}
+        cards = await get_all_cards()
+        now = datetime.now(TZ)
+
+        overdue_items = []
+        for card in cards:
+            if card["idList"] in done_ids:
+                continue
+            if not card.get("due"):
+                continue
+            due_dt = datetime.fromisoformat(card["due"].replace("Z", "+00:00")).astimezone(TZ)
+            if due_dt >= now:
+                continue
+            list_name = list_id_to_name.get(card["idList"], "")
+            member = next((m for m in MEMBERS if m in list_name), "?")
+            diff = now - due_dt
+            overdue_items.append({
+                "card": card,
+                "member": member,
+                "due_dt": due_dt,
+                "days": diff.days,
+                "hours": int(diff.total_seconds() / 3600),
+            })
+
+        embed = discord.Embed(
+            title="💀 งานที่เลยกำหนดแล้วไอ้พวกขี้ลืม!",
+            color=0xFF0000, timestamp=now
+        )
+        if not overdue_items:
+            embed.description = "ไม่มีงานเลยกำหนดเลยวะ ดีงาม 🎉"
+        else:
+            by_member: dict = {}
+            for item in overdue_items:
+                by_member.setdefault(item["member"], []).append(item)
+            for member, items in by_member.items():
+                lines = []
+                for item in items:
+                    late = f"{item['days']} วัน" if item["days"] >= 1 else f"{item['hours']} ชม."
+                    lines.append(f"• ⚠️ {item['card']['name']} *(เลยมา {late})*")
+                embed.add_field(
+                    name=f"{AVATARS.get(member,'')} {member} ({len(items)} งาน)",
+                    value="\n".join(lines), inline=False
+                )
+        await interaction.followup.send(embed=embed)
+    except Exception as e:
+        await interaction.followup.send(f"❌ พังอีกแล้ว: {e}")
+
+# ══════════════════════════════════════════════════════════════════
+# /editcard  FLOW: สมาชิก → card → เลือกแก้อะไร → กรอกค่าใหม่
+# ══════════════════════════════════════════════════════════════════
+
+# ── Edit modals ──────────────────────────────────────────────────
+class EditNameModal(discord.ui.Modal, title="✏️ แก้ชื่องาน"):
+    ชื่อใหม่ = discord.ui.TextInput(label="ชื่องานใหม่", required=True, max_length=200)
+
+    def __init__(self, card_id: str, card_name: str):
+        super().__init__()
+        self.card_id = card_id
+        self.card_name = card_name
+        self.ชื่อใหม่.default = card_name
+
+    async def on_submit(self, interaction: discord.Interaction):
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, partial(
+            requests.put, f"{TRELLO_BASE}/cards/{self.card_id}",
+            **{"params": {"key": TRELLO_API_KEY, "token": TRELLO_TOKEN},
+               "json": {"name": self.ชื่อใหม่.value}}
+        ))
+        await interaction.response.edit_message(
+            content=f"✅ แก้ชื่อแล้ว!\n~~{self.card_name}~~ → **{self.ชื่อใหม่.value}**",
+            view=None
+        )
+
+class EditNoteModal(discord.ui.Modal, title="📝 แก้หมายเหตุ"):
+    หมายเหตุใหม่ = discord.ui.TextInput(
+        label="หมายเหตุใหม่", style=discord.TextStyle.paragraph,
+        required=False, max_length=500
+    )
+
+    def __init__(self, card_id: str, current_desc: str):
+        super().__init__()
+        self.card_id = card_id
+        self.หมายเหตุใหม่.default = current_desc
+
+    async def on_submit(self, interaction: discord.Interaction):
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, partial(
+            requests.put, f"{TRELLO_BASE}/cards/{self.card_id}",
+            **{"params": {"key": TRELLO_API_KEY, "token": TRELLO_TOKEN},
+               "json": {"desc": self.หมายเหตุใหม่.value}}
+        ))
+        await interaction.response.edit_message(content="✅ แก้หมายเหตุแล้ว!", view=None)
+
+class EditCustomDateModal(discord.ui.Modal, title="📅 กรอกวันที่ใหม่"):
+    วันที่ = discord.ui.TextInput(
+        label="วันที่ใหม่", placeholder="เช่น 15/6 หรือ 15/6/2569",
+        required=True, max_length=12
+    )
+
+    def __init__(self, ctx: dict):
+        super().__init__()
+        self.ctx = ctx
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            parts = self.วันที่.value.strip().split("/")
+            d, m = int(parts[0]), int(parts[1])
+            y = int(parts[2]) - 543 if len(parts) >= 3 else datetime.now(TZ).year
+            self.ctx["date"] = (d, m, y)
+            view = EditTimeSelectView(ctx=self.ctx)
+            await interaction.response.edit_message(
+                content=f"**{self.ctx['card_name']}**\nเลือกเวลาใหม่\n📅 วัน: **{d}/{m}/{y+543}**",
+                view=view
+            )
+        except Exception:
+            await interaction.response.send_message("❌ รูปแบบวันไม่ถูกต้อง เช่น 15/6", ephemeral=True)
+
+class EditCustomTimeModal(discord.ui.Modal, title="⏰ กรอกเวลาใหม่"):
+    เวลา = discord.ui.TextInput(
+        label="เวลา", placeholder="เช่น 13:30", required=True, max_length=5
+    )
+
+    def __init__(self, ctx: dict):
+        super().__init__()
+        self.ctx = ctx
+
+    async def on_submit(self, interaction: discord.Interaction):
+        raw = self.เวลา.value.strip().replace(".", ":")
+        try:
+            parts = raw.split(":")
+            h, mn = int(parts[0]), int(parts[1]) if len(parts) > 1 else 0
+            if not (0 <= h <= 23 and 0 <= mn <= 59):
+                raise ValueError
+        except Exception:
+            await interaction.response.send_message("❌ รูปแบบเวลาไม่ถูกต้อง เช่น 13:30", ephemeral=True)
+            return
+        await self._update_due(interaction, f"{h}:{mn:02d}")
+
+    async def _update_due(self, interaction: discord.Interaction, time_str: str):
+        try:
+            d, m, y = self.ctx["date"]
+            h, mn = map(int, time_str.split(":"))
+            local_dt = TZ.localize(datetime(y, m, d, h, mn))
+            due_iso = local_dt.astimezone(pytz.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, partial(
+                requests.put, f"{TRELLO_BASE}/cards/{self.ctx['card_id']}",
+                **{"params": {"key": TRELLO_API_KEY, "token": TRELLO_TOKEN},
+                   "json": {"due": due_iso}}
+            ))
+            await interaction.response.edit_message(
+                content=f"✅ แก้กำหนดส่ง **{self.ctx['card_name']}** → {d}/{m}/{y+543} {time_str} น. แล้ว!",
+                view=None
+            )
+        except Exception as e:
+            await interaction.response.edit_message(content=f"❌ พังอีกแล้ว: {e}", view=None)
+
+# ── Edit time select ──────────────────────────────────────────────
+class EditTimeSelectView(discord.ui.View):
+    TIMES = ["9:00", "10:00", "12:00", "15:00", "18:00", "23:59"]
+
+    def __init__(self, ctx: dict):
+        super().__init__(timeout=120)
+        self.ctx = ctx
+        for t in self.TIMES:
+            self.add_item(self._make_btn(t))
+        btn_custom = discord.ui.Button(label="📝 กรอกเอง", style=discord.ButtonStyle.primary, row=1)
+        async def cb_custom(interaction: discord.Interaction):
+            await interaction.response.send_modal(EditCustomTimeModal(ctx=self.ctx))
+        btn_custom.callback = cb_custom
+        self.add_item(btn_custom)
+
+    def _make_btn(self, label):
+        btn = discord.ui.Button(label=label, style=discord.ButtonStyle.secondary)
+        async def cb(interaction: discord.Interaction, _label=label):
+            await self._submit(interaction, _label)
+        btn.callback = cb
+        return btn
+
+    async def on_timeout(self):
+        pass
+
+    async def _submit(self, interaction: discord.Interaction, time_str: str):
+        await interaction.response.defer()
+        try:
+            d, m, y = self.ctx["date"]
+            h, mn = map(int, time_str.split(":"))
+            local_dt = TZ.localize(datetime(y, m, d, h, mn))
+            due_iso = local_dt.astimezone(pytz.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, partial(
+                requests.put, f"{TRELLO_BASE}/cards/{self.ctx['card_id']}",
+                **{"params": {"key": TRELLO_API_KEY, "token": TRELLO_TOKEN},
+                   "json": {"due": due_iso}}
+            ))
+            await interaction.followup.edit_message(
+                interaction.message.id,
+                content=f"✅ แก้กำหนดส่ง **{self.ctx['card_name']}** → {d}/{m}/{y+543} {time_str} น. แล้ว!",
+                view=None
+            )
+        except Exception as e:
+            await interaction.followup.send(f"❌ พังอีกแล้ว: {e}")
+
+# ── Edit date select ──────────────────────────────────────────────
+class EditDateSelectView(discord.ui.View):
+    def __init__(self, ctx: dict):
+        super().__init__(timeout=120)
+        self.ctx = ctx
+        now = datetime.now(TZ)
+        labels = ["วันนี้", "พรุ่งนี้", "+2 วัน", "+3 วัน", "+7 วัน", "ลบกำหนดส่ง"]
+        deltas = [0, 1, 2, 3, 7, None]
+        for label, delta in zip(labels, deltas):
+            btn = discord.ui.Button(
+                label=label,
+                style=discord.ButtonStyle.secondary if delta is not None else discord.ButtonStyle.danger
+            )
+            if delta is not None:
+                target = now + timedelta(days=delta)
+                date_val = (target.day, target.month, target.year)
+            else:
+                date_val = None
+            async def cb(interaction, _label=label, _date=date_val):
+                await self._pick(interaction, _label, _date)
+            btn.callback = cb
+            self.add_item(btn)
+        btn_custom = discord.ui.Button(label="📝 กรอกเอง", style=discord.ButtonStyle.primary, row=1)
+        async def cb_custom(interaction: discord.Interaction):
+            await interaction.response.send_modal(EditCustomDateModal(ctx=self.ctx))
+        btn_custom.callback = cb_custom
+        self.add_item(btn_custom)
+
+    async def on_timeout(self):
+        pass
+
+    async def _pick(self, interaction: discord.Interaction, label: str, date_val):
+        if date_val is None:
+            # ลบกำหนดส่ง
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, partial(
+                requests.put, f"{TRELLO_BASE}/cards/{self.ctx['card_id']}",
+                **{"params": {"key": TRELLO_API_KEY, "token": TRELLO_TOKEN},
+                   "json": {"due": None}}
+            ))
+            await interaction.response.edit_message(
+                content=f"✅ ลบกำหนดส่งของ **{self.ctx['card_name']}** แล้ว", view=None
+            )
+            return
+        self.ctx["date"] = date_val
+        view = EditTimeSelectView(ctx=self.ctx)
+        suffix = f" ({date_val[0]}/{date_val[1]})"
+        await interaction.response.edit_message(
+            content=f"**{self.ctx['card_name']}**\nเลือกเวลาใหม่\n📅 วัน: **{label}{suffix}**",
+            view=view
+        )
+
+# ── Reassign member ───────────────────────────────────────────────
+class ReassignMemberSelect(discord.ui.Select):
+    def __init__(self, card: dict):
+        options = [
+            discord.SelectOption(label=f"{AVATARS.get(m,'')} {m}", value=m)
+            for m in MEMBERS
+        ]
+        super().__init__(placeholder="ย้ายให้ใคร?", options=options)
+        self.card = card
+
+    async def callback(self, interaction: discord.Interaction):
+        new_member = self.values[0]
+        lists = await get_lists()
+        # หา list "รอดำเนินการ" ของคนนั้นก่อน ถ้าไม่เจอค่อยเอา list แรกที่มีชื่อ
+        target = next(
+            (lid for lname, lid in lists.items()
+             if new_member in lname and "เสร็จ" not in lname and "กำลังทำ" not in lname),
+            None
+        ) or next(
+            (lid for lname, lid in lists.items() if new_member in lname), None
+        )
+        if not target:
+            await interaction.response.edit_message(
+                content=f"❌ หา list ของ {new_member} ไม่เจอวะ", view=None
+            )
+            return
+        await move_card(self.card["id"], target)
+        await interaction.response.edit_message(
+            content=f"✅ ย้าย **{self.card['name']}** ให้ {AVATARS.get(new_member,'')} {new_member} แล้ว!",
+            view=None
+        )
+
+class ReassignMemberView(discord.ui.View):
+    def __init__(self, card: dict):
+        super().__init__(timeout=60)
+        self.add_item(ReassignMemberSelect(card=card))
+
+    async def on_timeout(self):
+        pass
+
+# ── Edit options ──────────────────────────────────────────────────
+class EditOptionsView(discord.ui.View):
+    def __init__(self, card: dict):
+        super().__init__(timeout=60)
+        self.card = card
+
+    async def on_timeout(self):
+        pass
+
+    @discord.ui.button(label="✏️ แก้ชื่องาน", style=discord.ButtonStyle.primary)
+    async def btn_name(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(
+            EditNameModal(card_id=self.card["id"], card_name=self.card["name"])
+        )
+
+    @discord.ui.button(label="📅 แก้กำหนดส่ง", style=discord.ButtonStyle.secondary)
+    async def btn_due(self, interaction: discord.Interaction, button: discord.ui.Button):
+        ctx = {"card_id": self.card["id"], "card_name": self.card["name"]}
+        view = EditDateSelectView(ctx=ctx)
+        await interaction.response.edit_message(
+            content=f"**{self.card['name']}**\nเลือกกำหนดส่งใหม่:", view=view
+        )
+
+    @discord.ui.button(label="📝 แก้หมายเหตุ", style=discord.ButtonStyle.secondary)
+    async def btn_note(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(
+            EditNoteModal(card_id=self.card["id"], current_desc=self.card.get("desc", ""))
+        )
+
+    @discord.ui.button(label="👤 ย้ายให้คนอื่น", style=discord.ButtonStyle.danger)
+    async def btn_move(self, interaction: discord.Interaction, button: discord.ui.Button):
+        view = ReassignMemberView(card=self.card)
+        await interaction.response.edit_message(
+            content=f"**{self.card['name']}**\nย้ายให้ใครวะ?", view=view
+        )
+
+# ── Edit card select ──────────────────────────────────────────────
+class EditCardSelect(discord.ui.Select):
+    def __init__(self, cards: list):
+        options = [
+            discord.SelectOption(
+                label=c["name"][:80],
+                value=c["id"],
+                description=c.get("list_name", "")[:50]
+            ) for c in cards[:25]
+        ]
+        super().__init__(placeholder="เลือกงานที่จะแก้...", options=options)
+        self.cards = cards
+
+    async def callback(self, interaction: discord.Interaction):
+        card_id = self.values[0]
+        card = next(c for c in self.cards if c["id"] == card_id)
+        view = EditOptionsView(card=card)
+        await interaction.response.edit_message(
+            content=f"**{card['name']}**\nจะแก้อะไรวะ?", view=view
+        )
+
+class EditCardSelectView(discord.ui.View):
+    def __init__(self, cards: list):
+        super().__init__(timeout=60)
+        self.add_item(EditCardSelect(cards))
+
+    async def on_timeout(self):
+        pass
+
+class EditMemberSelect(discord.ui.Select):
+    def __init__(self):
+        options = [
+            discord.SelectOption(label=f"{AVATARS.get(m,'')} {m}", value=m)
+            for m in MEMBERS
+        ]
+        super().__init__(placeholder="เลือกสมาชิก...", options=options)
+
+    async def callback(self, interaction: discord.Interaction):
+        member = self.values[0]
+        cards = await fetch_member_cards(member)
+        if not cards:
+            await interaction.response.edit_message(
+                content=f"✅ {member} ไม่มีงานค้างวะ", view=None
+            )
+            return
+        view = EditCardSelectView(cards)
+        await interaction.response.edit_message(
+            content=f"**งานของ {member}** — เลือกงานที่จะแก้:", view=view
+        )
+
+class EditMemberSelectView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=60)
+        self.add_item(EditMemberSelect())
+
+    async def on_timeout(self):
+        pass
+
+@tree.command(name="editcard", description="แก้ไขงานที่จดผิด")
+async def editcard_command(interaction: discord.Interaction):
+    view = EditMemberSelectView()
+    await interaction.response.send_message(
+        "**✏️ แก้ไขงาน** — งานของใครวะ?",
+        view=view, ephemeral=True
+    )
+
 @client.event
 async def on_ready():
     await tree.sync()
