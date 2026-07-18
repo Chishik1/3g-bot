@@ -1,0 +1,11 @@
+app = "3g-bot"
+primary_region = "sin"
+
+[build]
+
+[processes]
+app = "python trello_discord_bot_1.py"
+
+[[vm]]
+size = "shared-cpu-1x"
+memory = "256mb"
