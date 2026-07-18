@@ -577,11 +577,11 @@ class CategorySelectView(discord.ui.View):
 class MemberSelect(discord.ui.Select):
     def __init__(self):
         options = [
-            discord.SelectOption(label="🟣 โดม", value="โดม", description="เว็บไซต์ & เกรดดิ้ง"),
-            discord.SelectOption(label="🟢 ไอซ์", value="ไอซ์", description="วิดีโอ, เว็บ & หน้าร้าน"),
-            discord.SelectOption(label="🟡 พี",   value="พี",   description="หน้าร้าน & อีเว้นท์"),
+            discord.SelectOption(label="🟣 โดม", value="โดม", description="Web master, Support"),
+            discord.SelectOption(label="🟢 ไอซ์", value="ไอซ์", description="Video, Support, Promotion Shopee, General Affairs"),
+            discord.SelectOption(label="🟡 พี",   value="พี",   description="หน้าร้าน, เบรค, ADS, Event BIC, Merchandise, Support"),
             discord.SelectOption(label="🔵 4ก",   value="4ก",   description="งานกลาง / มอบหมายร่วม"),
-            discord.SelectOption(label="🟠 กาย",  value="กาย",  description="เด็กใหม่"),
+            discord.SelectOption(label="🟠 กาย",  value="กาย",  description="Grading, Support, Information"),
         ]
         super().__init__(placeholder="เลือกสมาชิกที่รับผิดชอบ...", options=options)
 
