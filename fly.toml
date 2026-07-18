@@ -8,4 +8,4 @@ app = "python trello_discord_bot_1.py"
 
 [[vm]]
 size = "shared-cpu-1x"
-memory = "256mb"
+memory = "512mb"
