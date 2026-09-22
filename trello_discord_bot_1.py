@@ -1555,6 +1555,10 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     if reviewer_name not in REVIEWER_NAMES:
         return  # ต้องเป็นคนตรวจที่กำหนดไว้เท่านั้น ถึงจะนับว่าตรวจแล้ว
 
+    pending_info = pending_reviews.get(payload.message_id)
+    if pending_info is not None and payload.user_id == pending_info["poster_id"]:
+        return  # คนโพสต์เองกดปฏิกิริยาบนงานตัวเอง ไม่นับว่าตรวจ ไม่ต้องทำอะไร
+
     # เลือกได้แค่อันเดียวต่อคน — ลบปฏิกิริยาฝั่งตรงข้ามของคนเดิมออกเสมอ
     # (ทำก่อนเช็ค pending_reviews เพราะคลิกที่ 2 ของคนเดิมมักเกิดหลังรีวิวถูกปิดไปแล้ว
     # ถ้าเช็ค pending_reviews ก่อนจะ return ทิ้งไปเลยโดยไม่ทันได้ลบปฏิกิริยาฝั่งตรงข้าม)
