@@ -1,5 +1,5 @@
 app = "3g-bot"
-primary_region = "sin"
+primary_region = "nrt"
 
 [build]
 
