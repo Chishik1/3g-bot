@@ -1487,10 +1487,18 @@ async def editcard_command(interaction: discord.Interaction):
         view=view, ephemeral=True
     )
 
+_background_tasks_started = False
+
 @client.event
 async def on_ready():
+    global _background_tasks_started
     await tree.sync()
     print(f"✅ NOVA พร้อมใช้งานแล้ว: {client.user}")
+    # on_ready อาจถูกเรียกซ้ำได้ทุกครั้งที่ Discord gateway reconnect
+    # กันไม่ให้สร้าง background task ซ้อนกันหลายชุดตลอดอายุ process
+    if _background_tasks_started:
+        return
+    _background_tasks_started = True
     print(f"⏰ แจ้งเตือนทุกวัน เวลา 10:00, 12:30, 18:00 น.")
     client.loop.create_task(daily_notify())
     client.loop.create_task(deadline_alert())
