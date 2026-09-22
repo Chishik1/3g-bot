@@ -1505,6 +1505,8 @@ async def notify_reviewers(message: discord.Message):
         uid = MEMBER_DISCORD_IDS.get(name)
         if not uid:
             continue
+        if uid == message.author.id:
+            continue  # คนลงรูปเองไม่ต้องแจ้งให้ตรวจงานตัวเอง
         try:
             user = client.get_user(uid) or await client.fetch_user(uid)
             embed = discord.Embed(
@@ -1554,6 +1556,21 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     reviewer_name = DISCORD_ID_TO_MEMBER.get(payload.user_id)
     if reviewer_name not in REVIEWER_NAMES:
         return  # ต้องเป็นคนตรวจที่กำหนดไว้เท่านั้น ถึงจะนับว่าตรวจแล้ว
+
+    # เลือกได้แค่อันเดียวต่อคน — ลบปฏิกิริยาฝั่งตรงข้ามของคนเดิมออก
+    # (ต้องการสิทธิ์ Manage Messages ในช่องนั้น ไม่งั้นจะแค่ข้ามขั้นตอนนี้เฉยๆ ไม่ error)
+    other_emoji = REVIEW_REJECT_EMOJI if str(payload.emoji) == REVIEW_APPROVE_EMOJI else REVIEW_APPROVE_EMOJI
+    try:
+        channel = client.get_channel(payload.channel_id) or await client.fetch_channel(payload.channel_id)
+        message = await channel.fetch_message(payload.message_id)
+        member = payload.member
+        if member is None and message.guild is not None:
+            member = await message.guild.fetch_member(payload.user_id)
+        if member is not None:
+            await message.remove_reaction(other_emoji, member)
+    except Exception as e:
+        print(f"remove opposite reaction error: {e}")
+
     info = pending_reviews.pop(payload.message_id, None)
     if not info:
         return
