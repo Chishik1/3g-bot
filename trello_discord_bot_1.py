@@ -1496,17 +1496,18 @@ REVIEWER_NAMES = ["โดม", "พี", "ไอซ์", "กาย"]
 REVIEW_APPROVE_EMOJI = "✅"
 REVIEW_REJECT_EMOJI = "❌"
 REVIEW_ESCALATE_SECONDS = 300  # 5 นาที
+REVIEW_QUORUM = 2  # ต้องมีคนตรวจ (ไม่นับ NOVA และไม่นับคนโพสต์เอง) อย่างน้อยกี่คนถึงจะปิดรีวิว
 
-# message_id -> {"posted_at", "poster_id", "channel_id", "last_notified"}
+# message_id -> {"posted_at", "poster_id", "channel_id", "last_notified", "votes": {name: "approve"/"reject"}}
 pending_reviews: dict = {}
 
-async def notify_reviewers(message: discord.Message):
-    for name in REVIEWER_NAMES:
+async def notify_reviewers(message: discord.Message, target_names: list = None):
+    if target_names is None:
+        target_names = [n for n in REVIEWER_NAMES if MEMBER_DISCORD_IDS.get(n) != message.author.id]
+    for name in target_names:
         uid = MEMBER_DISCORD_IDS.get(name)
         if not uid:
             continue
-        if uid == message.author.id:
-            continue  # คนลงรูปเองไม่ต้องแจ้งให้ตรวจงานตัวเอง
         try:
             user = client.get_user(uid) or await client.fetch_user(uid)
             embed = discord.Embed(
@@ -1517,7 +1518,7 @@ async def notify_reviewers(message: discord.Message):
             if message.attachments:
                 embed.set_image(url=message.attachments[0].url)
             embed.add_field(name="ลิงก์ข้อความ", value=message.jump_url, inline=False)
-            embed.set_footer(text="กด ✅ ผ่าน หรือ ❌ ต้องแก้ไข ที่ข้อความในช่องได้เลย")
+            embed.set_footer(text=f"กด ✅ ผ่าน หรือ ❌ ต้องแก้ไข ที่ข้อความในช่องได้เลย (ต้องมีคนตรวจครบ {REVIEW_QUORUM} คนถึงจะสรุปผล)")
             await user.send(embed=embed)
         except Exception as e:
             print(f"notify_reviewers error ({name}): {e}")
@@ -1542,13 +1543,14 @@ async def on_message(message: discord.Message):
         "poster_id": message.author.id,
         "channel_id": message.channel.id,
         "last_notified": None,
+        "votes": {},
     }
     await notify_reviewers(message)
 
 @client.event
 async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     if client.user is not None and payload.user_id == client.user.id:
-        return
+        return  # ไม่นับปฏิกิริยาที่ NOVA ติดให้เองตอนแรก
     if str(payload.emoji) not in (REVIEW_APPROVE_EMOJI, REVIEW_REJECT_EMOJI):
         return
     reviewer_name = DISCORD_ID_TO_MEMBER.get(payload.user_id)
@@ -1560,7 +1562,7 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
         return  # คนโพสต์เองกดปฏิกิริยาบนงานตัวเอง ไม่นับว่าตรวจ ไม่ต้องทำอะไร
 
     # เลือกได้แค่อันเดียวต่อคน — ลบปฏิกิริยาฝั่งตรงข้ามของคนเดิมออกเสมอ
-    # (ทำก่อนเช็ค pending_reviews เพราะคลิกที่ 2 ของคนเดิมมักเกิดหลังรีวิวถูกปิดไปแล้ว
+    # (ทำก่อนเช็ค pending_reviews เพราะคลิกที่ 2 ของคนเดิมอาจเกิดหลังรีวิวถูกปิดไปแล้ว
     # ถ้าเช็ค pending_reviews ก่อนจะ return ทิ้งไปเลยโดยไม่ทันได้ลบปฏิกิริยาฝั่งตรงข้าม)
     other_emoji = REVIEW_REJECT_EMOJI if str(payload.emoji) == REVIEW_APPROVE_EMOJI else REVIEW_APPROVE_EMOJI
     try:
@@ -1575,18 +1577,26 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
         print(f"remove opposite reaction error: {e}")
 
     if payload.message_id not in pending_reviews:
-        return  # ตรวจไปแล้วก่อนหน้านี้ แค่ลบปฏิกิริยาฝั่งตรงข้ามให้ก็พอ
+        return  # ตรวจครบไปแล้วก่อนหน้านี้ แค่ลบปฏิกิริยาฝั่งตรงข้ามให้ก็พอ
 
-    info = pending_reviews.pop(payload.message_id, None)
-    if not info:
-        return
-    approved = str(payload.emoji) == REVIEW_APPROVE_EMOJI
+    info = pending_reviews[payload.message_id]
+    info["votes"][reviewer_name] = "approve" if str(payload.emoji) == REVIEW_APPROVE_EMOJI else "reject"
+
+    if len(info["votes"]) < REVIEW_QUORUM:
+        return  # ยังไม่ครบจำนวนคนตรวจขั้นต่ำ รอคนต่อไป
+
+    info = pending_reviews.pop(payload.message_id)
+    overall_approved = all(v == "approve" for v in info["votes"].values())
+    voters_desc = "\n".join(
+        f"{AVATARS.get(n,'')} {n}: {'ผ่าน ✅' if v == 'approve' else 'ต้องแก้ไข ❌'}"
+        for n, v in info["votes"].items()
+    )
     try:
         poster = client.get_user(info["poster_id"]) or await client.fetch_user(info["poster_id"])
         embed = discord.Embed(
-            title=f"ผลตรวจสอบรูปของคุณ: {'ผ่าน ✅' if approved else 'ต้องแก้ไข ❌'}",
-            description=f"ตรวจโดย {AVATARS.get(reviewer_name,'')} {reviewer_name}",
-            color=0x2ECC71 if approved else 0xE74C3C,
+            title=f"ผลตรวจสอบรูปของคุณ: {'ผ่าน ✅' if overall_approved else 'ต้องแก้ไข ❌'}",
+            description=voters_desc,
+            color=0x2ECC71 if overall_approved else 0xE74C3C,
             timestamp=datetime.now(TZ)
         )
         await poster.send(embed=embed)
@@ -1614,7 +1624,14 @@ async def review_escalation():
                 except Exception:
                     pending_reviews.pop(msg_id, None)
                     continue
-                await notify_reviewers(message)
+                poster_name = DISCORD_ID_TO_MEMBER.get(info["poster_id"])
+                remaining = [
+                    n for n in REVIEWER_NAMES
+                    if n != poster_name and n not in info["votes"]
+                ]
+                if not remaining:
+                    continue
+                await notify_reviewers(message, target_names=remaining)
         except Exception as e:
             print(f"review escalation error: {e}")
         await asyncio.sleep(60)
