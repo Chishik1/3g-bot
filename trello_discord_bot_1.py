@@ -1549,16 +1549,15 @@ async def on_message(message: discord.Message):
 async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     if client.user is not None and payload.user_id == client.user.id:
         return
-    if payload.message_id not in pending_reviews:
-        return
     if str(payload.emoji) not in (REVIEW_APPROVE_EMOJI, REVIEW_REJECT_EMOJI):
         return
     reviewer_name = DISCORD_ID_TO_MEMBER.get(payload.user_id)
     if reviewer_name not in REVIEWER_NAMES:
         return  # ต้องเป็นคนตรวจที่กำหนดไว้เท่านั้น ถึงจะนับว่าตรวจแล้ว
 
-    # เลือกได้แค่อันเดียวต่อคน — ลบปฏิกิริยาฝั่งตรงข้ามของคนเดิมออก
-    # (ต้องการสิทธิ์ Manage Messages ในช่องนั้น ไม่งั้นจะแค่ข้ามขั้นตอนนี้เฉยๆ ไม่ error)
+    # เลือกได้แค่อันเดียวต่อคน — ลบปฏิกิริยาฝั่งตรงข้ามของคนเดิมออกเสมอ
+    # (ทำก่อนเช็ค pending_reviews เพราะคลิกที่ 2 ของคนเดิมมักเกิดหลังรีวิวถูกปิดไปแล้ว
+    # ถ้าเช็ค pending_reviews ก่อนจะ return ทิ้งไปเลยโดยไม่ทันได้ลบปฏิกิริยาฝั่งตรงข้าม)
     other_emoji = REVIEW_REJECT_EMOJI if str(payload.emoji) == REVIEW_APPROVE_EMOJI else REVIEW_APPROVE_EMOJI
     try:
         channel = client.get_channel(payload.channel_id) or await client.fetch_channel(payload.channel_id)
@@ -1570,6 +1569,9 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
             await message.remove_reaction(other_emoji, member)
     except Exception as e:
         print(f"remove opposite reaction error: {e}")
+
+    if payload.message_id not in pending_reviews:
+        return  # ตรวจไปแล้วก่อนหน้านี้ แค่ลบปฏิกิริยาฝั่งตรงข้ามให้ก็พอ
 
     info = pending_reviews.pop(payload.message_id, None)
     if not info:
