@@ -153,6 +153,7 @@ async def fetch_member_cards(member: str):
 
 # ── discord setup ─────────────────────────────────────────────────
 intents = discord.Intents.default()
+intents.message_content = True  # ต้องเปิด "Message Content Intent" ใน Developer Portal ด้วย
 client = discord.Client(intents=intents)
 tree = app_commands.CommandTree(client)
 
@@ -1487,6 +1488,114 @@ async def editcard_command(interaction: discord.Interaction):
         view=view, ephemeral=True
     )
 
+# ══════════════════════════════════════════════════════════════════
+# ตรวจสอบรูปก่อนใช้งาน — ช่อง REVIEW_CHANNEL_ID
+# ══════════════════════════════════════════════════════════════════
+REVIEW_CHANNEL_ID = 1447896847267004420
+REVIEWER_NAMES = ["โดม", "พี", "ไอซ์", "กาย"]
+REVIEW_APPROVE_EMOJI = "✅"
+REVIEW_REJECT_EMOJI = "❌"
+REVIEW_ESCALATE_SECONDS = 300  # 5 นาที
+
+# message_id -> {"posted_at", "poster_id", "channel_id", "last_notified"}
+pending_reviews: dict = {}
+
+async def notify_reviewers(message: discord.Message):
+    for name in REVIEWER_NAMES:
+        uid = MEMBER_DISCORD_IDS.get(name)
+        if not uid:
+            continue
+        try:
+            user = client.get_user(uid) or await client.fetch_user(uid)
+            embed = discord.Embed(
+                title="🖼️ มีรูปใหม่รอตรวจสอบ",
+                description=f"โพสต์โดย {message.author.mention} ในช่อง {message.channel.mention}",
+                color=0xF5A623, timestamp=datetime.now(TZ)
+            )
+            if message.attachments:
+                embed.set_image(url=message.attachments[0].url)
+            embed.add_field(name="ลิงก์ข้อความ", value=message.jump_url, inline=False)
+            embed.set_footer(text="กด ✅ ผ่าน หรือ ❌ ต้องแก้ไข ที่ข้อความในช่องได้เลย")
+            await user.send(embed=embed)
+        except Exception as e:
+            print(f"notify_reviewers error ({name}): {e}")
+    if message.id in pending_reviews:
+        pending_reviews[message.id]["last_notified"] = datetime.now(TZ)
+
+@client.event
+async def on_message(message: discord.Message):
+    if message.author.bot:
+        return
+    if message.channel.id != REVIEW_CHANNEL_ID:
+        return
+    if not any((a.content_type or "").startswith("image/") for a in message.attachments):
+        return
+    try:
+        await message.add_reaction(REVIEW_APPROVE_EMOJI)
+        await message.add_reaction(REVIEW_REJECT_EMOJI)
+    except Exception as e:
+        print(f"review react error: {e}")
+    pending_reviews[message.id] = {
+        "posted_at": datetime.now(TZ),
+        "poster_id": message.author.id,
+        "channel_id": message.channel.id,
+        "last_notified": None,
+    }
+    await notify_reviewers(message)
+
+@client.event
+async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+    if client.user is not None and payload.user_id == client.user.id:
+        return
+    if payload.message_id not in pending_reviews:
+        return
+    if str(payload.emoji) not in (REVIEW_APPROVE_EMOJI, REVIEW_REJECT_EMOJI):
+        return
+    reviewer_name = DISCORD_ID_TO_MEMBER.get(payload.user_id)
+    if reviewer_name not in REVIEWER_NAMES:
+        return  # ต้องเป็นคนตรวจที่กำหนดไว้เท่านั้น ถึงจะนับว่าตรวจแล้ว
+    info = pending_reviews.pop(payload.message_id, None)
+    if not info:
+        return
+    approved = str(payload.emoji) == REVIEW_APPROVE_EMOJI
+    try:
+        poster = client.get_user(info["poster_id"]) or await client.fetch_user(info["poster_id"])
+        embed = discord.Embed(
+            title=f"ผลตรวจสอบรูปของคุณ: {'ผ่าน ✅' if approved else 'ต้องแก้ไข ❌'}",
+            description=f"ตรวจโดย {AVATARS.get(reviewer_name,'')} {reviewer_name}",
+            color=0x2ECC71 if approved else 0xE74C3C,
+            timestamp=datetime.now(TZ)
+        )
+        await poster.send(embed=embed)
+    except Exception as e:
+        print(f"notify poster review outcome error: {e}")
+
+@client.event
+async def on_raw_message_delete(payload: discord.RawMessageDeleteEvent):
+    pending_reviews.pop(payload.message_id, None)
+
+async def review_escalation():
+    await client.wait_until_ready()
+    while not client.is_closed():
+        try:
+            now = datetime.now(TZ)
+            for msg_id, info in list(pending_reviews.items()):
+                last = info["last_notified"] or info["posted_at"]
+                if (now - last).total_seconds() < REVIEW_ESCALATE_SECONDS:
+                    continue
+                channel = client.get_channel(info["channel_id"])
+                if not channel:
+                    channel = await client.fetch_channel(info["channel_id"])
+                try:
+                    message = await channel.fetch_message(msg_id)
+                except Exception:
+                    pending_reviews.pop(msg_id, None)
+                    continue
+                await notify_reviewers(message)
+        except Exception as e:
+            print(f"review escalation error: {e}")
+        await asyncio.sleep(60)
+
 _background_tasks_started = False
 
 @client.event
@@ -1503,8 +1612,10 @@ async def on_ready():
     client.loop.create_task(daily_notify())
     client.loop.create_task(deadline_alert())
     client.loop.create_task(morning_dm())
+    client.loop.create_task(review_escalation())
     print("🚨 เปิดระบบแจ้งเตือน deadline ล่วงหน้า 24 ชั่วโมงแล้ว")
     print("☀️ เปิดระบบ DM สรุปงานตอนเช้า 10:00 น. แล้ว")
+    print("🖼️ เปิดระบบแจ้งเตือนตรวจสอบรูปแล้ว")
 
 async def main():
     async with client:
