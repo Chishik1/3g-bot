@@ -2,11 +2,14 @@ import discord
 from discord import app_commands
 import requests
 import asyncio
+import calendar as pycal
+import io
 import re
 import time
 from functools import partial
 from datetime import datetime, timedelta
 import pytz
+from PIL import Image, ImageDraw, ImageFont
 
 # ====== ตั้งค่าตรงนี้ ======
 import os
@@ -1489,6 +1492,243 @@ async def editcard_command(interaction: discord.Interaction):
     )
 
 # ══════════════════════════════════════════════════════════════════
+# ปฏิทินงาน — /calendar (ตารางรายเดือน) + สรุปสัปดาห์ทุกเช้าวันจันทร์
+# ══════════════════════════════════════════════════════════════════
+THAI_MONTHS = ["มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน",
+               "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม"]
+THAI_DOW_SHORT_SUN_FIRST = ["อา.", "จ.", "อ.", "พ.", "พฤ.", "ศ.", "ส."]
+THAI_DOW_FULL = ["จันทร์", "อังคาร", "พุธ", "พฤหัสบดี", "ศุกร์", "เสาร์", "อาทิตย์"]  # index = weekday()
+MEMBER_COLORS = {
+    "โดม": (155, 114, 207), "ไอซ์": (46, 184, 114), "พี": (232, 179, 38),
+    "4ก": (66, 133, 244), "กาย": (240, 134, 52),
+}
+UNASSIGNED_COLOR = (130, 130, 140)
+WEEKLY_DIGEST_HOUR = 9  # วันจันทร์ 09:00 น.
+
+_FONT_REGULAR = [("/usr/share/fonts/truetype/tlwg/Loma.ttf", 0),
+                 ("/System/Library/Fonts/Supplemental/Ayuthaya.ttf", 0),
+                 ("/System/Library/Fonts/Thonburi.ttc", 0)]
+_FONT_BOLD = [("/usr/share/fonts/truetype/tlwg/Loma-Bold.ttf", 0),
+              ("/System/Library/Fonts/Thonburi.ttc", 1),
+              ("/System/Library/Fonts/Supplemental/Ayuthaya.ttf", 0)]
+
+def _load_font(candidates, size):
+    for path, index in candidates:
+        try:
+            return ImageFont.truetype(path, size, index=index)
+        except Exception:
+            continue
+    print("⚠️ ไม่พบฟอนต์ไทยสำหรับวาดปฏิทิน ข้อความไทยจะแสดงไม่ถูกต้อง")
+    return ImageFont.load_default()
+
+def _fit_text(text, font, max_width):
+    if font.getlength(text) <= max_width:
+        return text
+    while len(text) > 1 and font.getlength(text + "…") > max_width:
+        text = text[:-1]
+    return text + "…"
+
+def _member_of_list(list_name):
+    return next((m for m in MEMBERS if m in list_name), None)
+
+async def get_calendar_items(member_filter: str = None) -> list:
+    """งานที่ยังไม่เสร็จและมี due date: [{'name','member','due'(datetime TZ)}]"""
+    lists = await get_lists()
+    done_ids = {v for k, v in lists.items() if "เสร็จ" in k}
+    list_id_to_name = {v: k for k, v in lists.items()}
+    items = []
+    for card in await get_all_cards():
+        if card["idList"] in done_ids or not card.get("due"):
+            continue
+        try:
+            due = datetime.fromisoformat(card["due"].replace("Z", "+00:00")).astimezone(TZ)
+        except Exception:
+            continue
+        member = _member_of_list(list_id_to_name.get(card["idList"], ""))
+        if member_filter and member != member_filter:
+            continue
+        items.append({"name": card["name"], "member": member, "due": due})
+    items.sort(key=lambda i: i["due"])
+    return items
+
+def render_month_png(year: int, month: int, items: list, member_filter: str = None) -> bytes:
+    weeks = pycal.Calendar(firstweekday=6).monthdayscalendar(year, month)
+    W, MARGIN, HEADER, DOW_H, CELL_H = 1400, 30, 120, 44, 150
+    col_w = (W - 2 * MARGIN) // 7
+    H = MARGIN + HEADER + DOW_H + CELL_H * len(weeks) + MARGIN
+    img = Image.new("RGB", (W, H), (250, 250, 252))
+    d = ImageDraw.Draw(img)
+    f_title, f_sub = _load_font(_FONT_BOLD, 50), _load_font(_FONT_REGULAR, 22)
+    f_dow, f_day = _load_font(_FONT_BOLD, 22), _load_font(_FONT_BOLD, 24)
+    f_item, f_small = _load_font(_FONT_REGULAR, 17), _load_font(_FONT_REGULAR, 16)
+
+    today = datetime.now(TZ).date()
+    d.text((MARGIN, MARGIN), f"{THAI_MONTHS[month - 1]} {year + 543}", font=f_title, fill=(30, 30, 40))
+    sub = f"เฉพาะงานของ {member_filter}" if member_filter else "ทุกคน"
+    d.text((MARGIN, MARGIN + 66), f"ปฏิทินงาน • {sub} • เฉพาะงานที่ยังไม่เสร็จ", font=f_sub, fill=(110, 110, 125))
+
+    lx = W - MARGIN
+    for name in reversed(list(MEMBER_COLORS.keys())):
+        w = int(f_small.getlength(name)) + 34
+        lx -= w
+        d.ellipse((lx, MARGIN + 74, lx + 14, MARGIN + 88), fill=MEMBER_COLORS[name])
+        d.text((lx + 20, MARGIN + 69), name, font=f_small, fill=(70, 70, 85))
+
+    top = MARGIN + HEADER
+    for i, label in enumerate(THAI_DOW_SHORT_SUN_FIRST):
+        x = MARGIN + i * col_w
+        d.rectangle((x, top, x + col_w, top + DOW_H), fill=(236, 237, 243))
+        tw = d.textlength(label, font=f_dow)
+        d.text((x + (col_w - tw) / 2, top + 8), label, font=f_dow, fill=(70, 70, 85))
+
+    by_day = {}
+    for it in items:
+        if it["due"].year == year and it["due"].month == month:
+            by_day.setdefault(it["due"].day, []).append(it)
+
+    grid_top = top + DOW_H
+    for r, week in enumerate(weeks):
+        for c, day in enumerate(week):
+            x, y = MARGIN + c * col_w, grid_top + r * CELL_H
+            d.rectangle((x, y, x + col_w, y + CELL_H), fill=(255, 255, 255), outline=(222, 224, 232))
+            if day == 0:
+                d.rectangle((x + 1, y + 1, x + col_w - 1, y + CELL_H - 1), fill=(246, 247, 250))
+                continue
+            is_today = (year, month, day) == (today.year, today.month, today.day)
+            if is_today:
+                d.rectangle((x + 1, y + 1, x + col_w - 1, y + CELL_H - 1), fill=(240, 246, 255))
+                d.ellipse((x + 6, y + 5, x + 40, y + 39), fill=(66, 133, 244))
+            num = str(day)
+            nw = d.textlength(num, font=f_day)
+            d.text((x + 23 - nw / 2 if is_today else x + 12, y + 8), num, font=f_day,
+                   fill=(255, 255, 255) if is_today else (50, 50, 65))
+            day_items = by_day.get(day, [])
+            shown = day_items if len(day_items) <= 4 else day_items[:3]
+            for k, it in enumerate(shown):
+                iy = y + 44 + k * 25
+                color = MEMBER_COLORS.get(it["member"], UNASSIGNED_COLOR)
+                d.rounded_rectangle((x + 6, iy, x + col_w - 6, iy + 22), radius=5,
+                                    fill=tuple(int(v * 0.18 + 255 * 0.82) for v in color))
+                d.rectangle((x + 6, iy, x + 10, iy + 22), fill=color)
+                d.text((x + 15, iy + 1), _fit_text(it["name"], f_item, col_w - 28), font=f_item, fill=(40, 40, 55))
+            if len(day_items) > 4:
+                d.text((x + 12, y + 44 + 3 * 25 + 1), f"+{len(day_items) - 3} งาน", font=f_small, fill=(110, 110, 125))
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
+
+async def build_calendar_file(year: int, month: int, member_filter: str = None) -> discord.File:
+    items = await get_calendar_items(member_filter)
+    loop = asyncio.get_running_loop()
+    png = await loop.run_in_executor(None, partial(render_month_png, year, month, items, member_filter))
+    return discord.File(io.BytesIO(png), filename=f"calendar-{year}-{month:02d}.png")
+
+def _shift_month(year, month, delta):
+    idx = year * 12 + (month - 1) + delta
+    return idx // 12, idx % 12 + 1
+
+def _calendar_caption(year, month, member_filter):
+    who = f" • {member_filter}" if member_filter else ""
+    return f"📅 **ปฏิทินงาน {THAI_MONTHS[month - 1]} {year + 543}**{who}"
+
+class CalendarView(discord.ui.View):
+    def __init__(self, year: int, month: int, member_filter: str = None):
+        super().__init__(timeout=600)
+        self.year, self.month, self.member_filter = year, month, member_filter
+
+    async def _go(self, interaction: discord.Interaction, year: int, month: int):
+        await interaction.response.defer()
+        self.year, self.month = year, month
+        try:
+            file = await build_calendar_file(year, month, self.member_filter)
+            await interaction.edit_original_response(
+                content=_calendar_caption(year, month, self.member_filter), attachments=[file], view=self
+            )
+        except Exception as e:
+            await interaction.followup.send(f"❌ เกิดข้อผิดพลาด: {e}", ephemeral=True)
+
+    @discord.ui.button(label="◀ เดือนก่อน", style=discord.ButtonStyle.secondary)
+    async def btn_prev(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._go(interaction, *_shift_month(self.year, self.month, -1))
+
+    @discord.ui.button(label="เดือนนี้", style=discord.ButtonStyle.primary)
+    async def btn_today(self, interaction: discord.Interaction, button: discord.ui.Button):
+        now = datetime.now(TZ)
+        await self._go(interaction, now.year, now.month)
+
+    @discord.ui.button(label="เดือนหน้า ▶", style=discord.ButtonStyle.secondary)
+    async def btn_next(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._go(interaction, *_shift_month(self.year, self.month, 1))
+
+@tree.command(name="calendar", description="ดูปฏิทินงานรายเดือน (เลือกดูเฉพาะคนได้)")
+@app_commands.describe(ชื่อ="ดูเฉพาะงานของคนนี้ (เว้นว่าง = ทุกคน)")
+@app_commands.choices(ชื่อ=MEMBER_CHOICES)
+async def calendar_command(interaction: discord.Interaction, ชื่อ: app_commands.Choice[str] = None):
+    await interaction.response.defer()
+    member_filter = ชื่อ.value if ชื่อ is not None else None
+    now = datetime.now(TZ)
+    try:
+        file = await build_calendar_file(now.year, now.month, member_filter)
+        await interaction.followup.send(
+            content=_calendar_caption(now.year, now.month, member_filter),
+            file=file, view=CalendarView(now.year, now.month, member_filter)
+        )
+    except Exception as e:
+        await interaction.followup.send(f"❌ เกิดข้อผิดพลาด: {e}")
+
+def build_week_embed(items: list, week_start, overdue_count: int) -> discord.Embed:
+    week_end = week_start + timedelta(days=6)
+    embed = discord.Embed(
+        title=f"🗓️ งานสัปดาห์นี้ ({week_start.day}/{week_start.month} – {week_end.day}/{week_end.month})",
+        description=f"{len(items)} งานที่ครบกำหนดในสัปดาห์นี้" if items else "สัปดาห์นี้ไม่มีงานที่ครบกำหนด 🎉",
+        color=0x4285F4, timestamp=datetime.now(TZ)
+    )
+    for i in range(7):
+        day = week_start + timedelta(days=i)
+        day_items = [it for it in items if it["due"].date() == day]
+        if not day_items and not items:
+            continue
+        lines = []
+        for it in day_items:
+            t = "ทั้งวัน" if (it["due"].hour, it["due"].minute) == (23, 59) else it["due"].strftime("%H:%M")
+            lines.append(f"{t} {AVATARS.get(it['member'], '⚪')} {it['name']}")
+        value = "\n".join(lines) or "—"
+        if len(value) > 1000:
+            value = value[:997] + "…"
+        embed.add_field(name=f"{THAI_DOW_FULL[i]} {day.day}/{day.month}", value=value, inline=False)
+    if overdue_count:
+        embed.set_footer(text=f"⚠️ มีงานเลยกำหนดค้างอยู่ {overdue_count} งาน ดูได้ที่ /overdue")
+    return embed
+
+async def post_weekly_digest(channel):
+    now = datetime.now(TZ)
+    week_start = now.date() - timedelta(days=now.weekday())
+    week_end = week_start + timedelta(days=6)
+    all_items = await get_calendar_items()
+    week_items = [i for i in all_items if week_start <= i["due"].date() <= week_end]
+    overdue = sum(1 for i in all_items if i["due"] < now)
+    embed = build_week_embed(week_items, week_start, overdue)
+    file = await build_calendar_file(now.year, now.month)
+    embed.set_image(url=f"attachment://{file.filename}")
+    await channel.send(embed=embed, file=file)
+
+async def weekly_calendar_digest():
+    await client.wait_until_ready()
+    last_sent_date = None
+    while not client.is_closed():
+        now = datetime.now(TZ)
+        if now.weekday() == 0 and now.hour == WEEKLY_DIGEST_HOUR and last_sent_date != now.date():
+            last_sent_date = now.date()
+            try:
+                channel = client.get_channel(NOTIFY_CHANNEL_ID) or await client.fetch_channel(NOTIFY_CHANNEL_ID)
+                await post_weekly_digest(channel)
+                print("✓ ส่งสรุปปฏิทินสัปดาห์แล้ว")
+            except Exception as e:
+                print(f"weekly digest error: {e}")
+        await asyncio.sleep(60)
+
+# ══════════════════════════════════════════════════════════════════
 # ตรวจสอบรูปก่อนใช้งาน — ช่อง REVIEW_CHANNEL_ID
 # ══════════════════════════════════════════════════════════════════
 REVIEW_CHANNEL_ID = 1447896847267004420
@@ -1653,9 +1893,11 @@ async def on_ready():
     client.loop.create_task(deadline_alert())
     client.loop.create_task(morning_dm())
     client.loop.create_task(review_escalation())
+    client.loop.create_task(weekly_calendar_digest())
     print("🚨 เปิดระบบแจ้งเตือน deadline ล่วงหน้า 24 ชั่วโมงแล้ว")
     print("☀️ เปิดระบบ DM สรุปงานตอนเช้า 10:00 น. แล้ว")
     print("🖼️ เปิดระบบแจ้งเตือนตรวจสอบรูปแล้ว")
+    print("🗓️ เปิดระบบสรุปปฏิทินสัปดาห์ทุกเช้าวันจันทร์แล้ว")
 
 async def main():
     async with client:
