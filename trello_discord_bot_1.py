@@ -35,6 +35,7 @@ PEOPLE = {
     "Best":   {"id": 1328671400726106125, "team": "วิดีโอ",    "emoji": "🔴", "color": (230, 70, 70),   "desc": "ทีมวิดีโอ"},
     "Flow":   {"id": 1447853135665303673, "team": "วิดีโอ",    "emoji": "🩵", "color": (40, 170, 190),  "desc": "ทีมวิดีโอ"},
     "ไอเซฟ":  {"id": 1519619421323264070, "team": "วิดีโอ",    "emoji": "🟤", "color": (140, 100, 70),  "desc": "ทีมวิดีโอ"},
+    "ทีมวีดีโอ": {"id": None,             "team": "วิดีโอ",    "emoji": "🎬", "color": (140, 160, 40),  "desc": "งานกลางทีมวิดีโอ / มอบหมายร่วม"},
     "Stamp":  {"id": 1447873476462645350, "team": "คอนเทนต์", "emoji": "🩷", "color": (236, 110, 170), "desc": "ทีมคอนเทนต์"},
     "SATANG": {"id": 1513433329268166726, "team": "คอนเทนต์", "emoji": "⚫", "color": (70, 75, 95),    "desc": "ทีมคอนเทนต์"},
 }
@@ -964,11 +965,12 @@ async def mywork_command(interaction: discord.Interaction, ชื่อ: app_com
 # ── DM สรุปงานตอนเช้า ─────────────────────────────────────────────
 MORNING_DM_TIME = (10, 0)
 
-# ── การมอบหมายงานใหม่: DM แจ้งทันที (4ก = DM ทุกคนในทีมแยกกัน) ────
+# ── การมอบหมายงานใหม่: DM แจ้งทันที (ลิสต์กลางอย่าง 4ก/ทีมวีดีโอ = DM ทุกคนในทีมนั้นแยกกัน) ────
 async def notify_assignment(member: str, task_text: str, due_display: str = None,
                              interaction: discord.Interaction = None):
-    targets = ([n for n, p in PEOPLE.items() if p["team"] == "กราฟิก" and p["id"]]
-               if member == "4ก" else [member])
+    shared = PEOPLE.get(member)
+    targets = ([n for n, p in PEOPLE.items() if p["team"] == shared["team"] and p["id"]]
+               if shared and shared["id"] is None else [member])
     for name in targets:
         uid = MEMBER_DISCORD_IDS.get(name)
         if not uid:
@@ -1015,7 +1017,11 @@ async def send_personal_summaries(now: datetime, h: int, mn: int, test: bool = F
     morning = (h, mn) == MORNING_DM_TIME
     for member, uid in MEMBER_DISCORD_IDS.items():
         try:
-            cards = sort_by_due(await fetch_member_cards(member))
+            cards = await fetch_member_cards(member)
+            for shared_name, sp in PEOPLE.items():  # งานกลางของทีม (ลิสต์ที่ไม่มี Discord ID)
+                if sp["id"] is None and sp["team"] == PEOPLE[member]["team"]:
+                    cards += await fetch_member_cards(shared_name)
+            cards = sort_by_due(cards)
             if not cards and not morning and not test:
                 continue  # รอบสายไม่รบกวนคนที่ไม่มีงานค้าง
             lines, overdue_n = [], 0
