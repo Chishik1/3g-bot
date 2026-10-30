@@ -245,6 +245,50 @@ def build_desc(note: str, interaction: discord.Interaction = None, assignees: li
         parts.append(f"---\nสั่งโดย: <@{u.id}> ({u.display_name})")
     return "\n\n".join(parts)
 
+def notify_channel_ids() -> set:
+    return {cid for _gid, cid, _names in notify_targets()}
+
+async def announce_done(name: str, owner, desc: str, card_id: str, user, skip_channel_id: int = None):
+    """ประกาศลงห้องกลางของแต่ละเซิร์ฟเวอร์ (เฉพาะเซิร์ฟเวอร์ที่เห็นทีมของงานนี้) ว่ามีงานเสร็จ"""
+    try:
+        note = ""
+        gm = GROUP_RE.search(desc or "")
+        if gm:  # งานข้ามทีม: บอกว่าเหลือทีมไหนบ้าง
+            lists = await get_lists()
+            done_ids = {v for k, v in lists.items() if "เสร็จ" in k}
+            id_to_name = {v: k for k, v in lists.items()}
+            marker = f"กลุ่มงาน: {gm.group(1)}"
+            left = [id_to_name.get(c["idList"], "?") for c in await get_all_cards()
+                    if c["id"] != card_id and c["idList"] not in done_ids and marker in (c.get("desc") or "")]
+            note = (f"\n🔗 งานข้ามทีม — เหลือ {', '.join(left)}" if left else "\n🔗 งานข้ามทีม — ครบทุกทีมแล้ว 🎉")
+        where = f" ({AVATARS.get(owner, '')} {owner})" if owner else ""
+        embed = discord.Embed(
+            description=f"✅ **{user.display_name}** ทำ **{name}** เสร็จแล้ว{where}{note}",
+            color=0x2ECC71, timestamp=datetime.now(TZ)
+        )
+        for _gid, cid, names in notify_targets():
+            if cid == skip_channel_id or (owner is not None and owner not in names):
+                continue
+            try:
+                channel = client.get_channel(cid) or await client.fetch_channel(cid)
+                await channel.send(embed=embed)
+            except Exception as e:
+                print(f"announce_done send error (channel {cid}): {e}")
+    except Exception as e:
+        print(f"announce_done error: {e}")
+
+async def complete_card(card_id: str, done_list_id: str, user, card_name: str = None, skip_channel_id: int = None):
+    """ย้ายการ์ดไป 'เสร็จแล้ว' → แจ้งคนสั่ง → ประกาศลงห้องกลาง"""
+    lists = await get_lists()
+    id_to_name = {v: k for k, v in lists.items()}
+    card = next((c for c in await get_all_cards() if c["id"] == card_id), None)
+    owner = _member_of_list(id_to_name.get(card["idList"], "")) if card else None
+    desc = (card.get("desc") if card else "") or ""
+    name = card_name or (card["name"] if card else card_id)
+    await move_card(card_id, done_list_id)
+    await notify_requester_done(card_id, name, completer_id=user.id)
+    await announce_done(name, owner, desc, card_id, user, skip_channel_id)
+
 async def notify_requester_done(card_id: str, card_name: str = None, completer_id: int = None):
     try:
         loop = asyncio.get_running_loop()
@@ -341,8 +385,7 @@ class DoneCardButton(discord.ui.DynamicItem[discord.ui.Button],
             if not target:
                 await interaction.followup.send("❌ ไม่พบลิสต์ 'เสร็จแล้ว' ในบอร์ด", ephemeral=True)
                 return
-            await move_card(self.card_id, target)
-            await notify_requester_done(self.card_id, completer_id=interaction.user.id)
+            await complete_card(self.card_id, target, interaction.user)
             view = discord.ui.View.from_message(interaction.message, timeout=None)
             for child in view.children:
                 if getattr(child, "custom_id", None) == self.item.custom_id:
@@ -968,8 +1011,7 @@ class StatusChoiceView(discord.ui.View):
             if not target:
                 await interaction.followup.send("❌ ไม่พบลิสต์ 'เสร็จแล้ว' ในบอร์ด")
                 return
-            await move_card(self.card_id, target)
-            await notify_requester_done(self.card_id, self.card_name, completer_id=interaction.user.id)
+            await complete_card(self.card_id, target, interaction.user, self.card_name)
             await interaction.followup.edit_message(
                 interaction.message.id,
                 content=f"✅ **{self.card_name}** → เสร็จสมบูรณ์แล้ว 🎉",
@@ -1078,8 +1120,7 @@ class QuickDoneSelect(discord.ui.Select):
             card_name = next((c["name"] for c in await get_all_cards() if c["id"] == card_id), card_id)
             lists = await get_lists()
             done_list = next((v for k, v in lists.items() if "เสร็จ" in k), None)
-            await move_card(card_id, done_list)
-            await notify_requester_done(card_id, card_name, completer_id=interaction.user.id)
+            await complete_card(card_id, done_list, interaction.user, card_name)
             if private:  # /mywork ส่วนตัว: แทนที่ด้วยข้อความยืนยัน
                 await interaction.edit_original_response(
                     content=f"✅ **{card_name}** → เสร็จสมบูรณ์แล้ว 🎉", view=None
@@ -1090,7 +1131,8 @@ class QuickDoneSelect(discord.ui.Select):
             await interaction.edit_original_response(
                 view=QuickDoneView(remaining, persistent=True) if remaining else None
             )
-            await interaction.followup.send(f"✅ **{interaction.user.display_name}** ทำ **{card_name}** เสร็จแล้ว 🎉")
+            if interaction.channel_id not in notify_channel_ids():  # ห้องกลางจะได้ประกาศจาก announce_done อยู่แล้ว
+                await interaction.followup.send(f"✅ **{interaction.user.display_name}** ทำ **{card_name}** เสร็จแล้ว 🎉")
         except Exception as e:
             await interaction.followup.send(f"❌ เกิดข้อผิดพลาด: {e}", ephemeral=True)
 
