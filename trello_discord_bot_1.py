@@ -6,6 +6,7 @@ import calendar as pycal
 import io
 import re
 import time
+import uuid
 from functools import partial
 from datetime import datetime, timedelta
 import pytz
@@ -35,6 +36,7 @@ PEOPLE = {
     "Best":   {"id": 1328671400726106125, "team": "วิดีโอ",    "emoji": "🔴", "color": (230, 70, 70),   "desc": "ทีมวิดีโอ"},
     "Flow":   {"id": 1447853135665303673, "team": "วิดีโอ",    "emoji": "🩵", "color": (40, 170, 190),  "desc": "ทีมวิดีโอ"},
     "ไอเซฟ":  {"id": 1519619421323264070, "team": "วิดีโอ",    "emoji": "🟤", "color": (140, 100, 70),  "desc": "ทีมวิดีโอ"},
+    "ทีมคอนเทนต์": {"id": None, "team": "คอนเทนต์", "emoji": "📝", "color": (180, 90, 40), "desc": "งานกลางทีมคอนเทนต์ / มอบหมายร่วม"},
     "ทีมวีดีโอ": {"id": None,             "team": "วิดีโอ",    "emoji": "🎬", "color": (140, 160, 40),  "desc": "งานกลางทีมวิดีโอ / มอบหมายร่วม"},
     "Stamp":  {"id": 1447873476462645350, "team": "คอนเทนต์", "emoji": "🩷", "color": (236, 110, 170), "desc": "ทีมคอนเทนต์"},
     "SATANG": {"id": 1513433329268166726, "team": "คอนเทนต์", "emoji": "⚫", "color": (70, 75, 95),    "desc": "ทีมคอนเทนต์"},
@@ -163,7 +165,9 @@ async def get_active_cards(names: list = None):
         status = "🔄 กำลังทำ" if "กำลังทำ" in list_name else "📋 รอดำเนินการ"
         raw = parse_assignees(card.get("desc"))
         who = [display_assignee(x) for x in raw]
-        who_str = f" 👥 {', '.join(who)}" if len(who) > 1 or (raw and raw[0].startswith("ทีม:")) else ""
+        who_str = f" 👥 {', '.join(who)}" if len(who) > 1 else ""
+        if GROUP_RE.search(card.get("desc") or ""):
+            who_str += " 🔗 งานข้ามทีม"
         result[member].append(f"{status} {card['name']}{due_str}{who_str}")
     return result
 
@@ -208,6 +212,7 @@ def cards_cap_note(total: int, shown: int = 25) -> str:
 REQUESTER_RE = re.compile(r"สั่งโดย: <@(\d+)>")
 
 ASSIGNEES_RE = re.compile(r"^ผู้รับผิดชอบ:\s*(.+)$", re.M)
+GROUP_RE = re.compile(r"^กลุ่มงาน:\s*(\w+)$", re.M)
 
 def parse_assignees(desc: str) -> list:
     m = ASSIGNEES_RE.search(desc or "")
@@ -226,12 +231,15 @@ def expand_assignees(tokens: list) -> list:
 def display_assignee(token: str) -> str:
     return "ทีม" + token[4:] if token.startswith("ทีม:") else token
 
-def build_desc(note: str, interaction: discord.Interaction = None, assignees: list = None) -> str:
+def build_desc(note: str, interaction: discord.Interaction = None, assignees: list = None,
+               group: str = None) -> str:
     parts = []
     if note:
         parts.append(note)
     if assignees:
         parts.append("ผู้รับผิดชอบ: " + ", ".join(assignees))
+    if group:
+        parts.append(f"กลุ่มงาน: {group}")
     if interaction is not None:
         u = interaction.user
         parts.append(f"---\nสั่งโดย: <@{u.id}> ({u.display_name})")
@@ -251,9 +259,19 @@ async def notify_requester_done(card_id: str, card_name: str = None, completer_i
         uid = int(m.group(1))
         if completer_id is not None and uid == completer_id:
             return  # คนสั่งกดเสร็จเอง ไม่ต้อง DM ตัวเอง
+        group_title = None
+        gm = GROUP_RE.search(data.get("desc") or "")
+        if gm:  # งานข้ามทีม: แจ้งเมื่อการ์ดของทุกทีมเสร็จครบ
+            lists = await get_lists()
+            done_ids = {v for k, v in lists.items() if "เสร็จ" in k}
+            marker = f"กลุ่มงาน: {gm.group(1)}"
+            if any(c["id"] != card_id and c["idList"] not in done_ids and marker in (c.get("desc") or "")
+                   for c in await get_all_cards()):
+                return
+            group_title = "✅ งานที่คุณสั่งเสร็จครบทุกทีมแล้ว"
         user = client.get_user(uid) or await client.fetch_user(uid)
         embed = discord.Embed(
-            title="✅ งานที่คุณสั่งเสร็จเรียบร้อยแล้ว",
+            title=group_title or "✅ งานที่คุณสั่งเสร็จเรียบร้อยแล้ว",
             description=card_name or data.get("name", ""),
             color=0x2ECC71, timestamp=datetime.now(TZ)
         )
@@ -450,6 +468,77 @@ CATEGORIES = [
     ("📌", "อื่นๆ"),
 ]
 
+def make_placements(tokens: list) -> list:
+    """หนึ่งการ์ดต่อทีมที่เกี่ยวข้อง: [(ลิสต์ที่วาง, โทเคนผู้รับผิดชอบของการ์ดนั้น)]
+    ทีมที่เลือกทั้งทีม → ลิสต์กลางของทีม, คนรายบุคคลของทีมที่ไม่ได้เลือกทั้งทีม → ลิสต์คนแรกของทีมนั้น"""
+    teams = [t[4:] for t in tokens if t.startswith("ทีม:")]
+    people = [t for t in tokens if not t.startswith("ทีม:")]
+    order = TEAM_ORDER + [t for t in {PEOPLE[n]["team"] for n in people} | set(teams) if t not in TEAM_ORDER]
+    by_team = {}
+    for n in people:
+        if PEOPLE[n]["team"] not in teams:
+            by_team.setdefault(PEOPLE[n]["team"], []).append(n)
+    placements = []
+    for t in order:
+        if t in teams:
+            shared = next((n for n, p in PEOPLE.items() if p["id"] is None and p["team"] == t), None)
+            owner = shared or next(n for n, p in PEOPLE.items() if p["team"] == t and p["id"])
+            placements.append((owner, [f"ทีม:{t}"]))
+        elif t in by_team:
+            grp = by_team[t]
+            placements.append((grp[0], grp if len(grp) > 1 else []))
+    return placements
+
+async def create_task_cards(interaction: discord.Interaction, ctx: dict, card_name: str,
+                            due_iso, due_display, cat_icon: str, lists: dict) -> list:
+    tokens = ctx.get("assignees") or []
+    placements = make_placements(tokens) if tokens else [(ctx["member"], [])]
+    for owner, _ in placements:
+        if owner not in lists:
+            raise Exception(f"ไม่พบลิสต์ของ {owner} ในบอร์ด")
+    group = uuid.uuid4().hex[:8] if len(placements) > 1 else None
+    loop = asyncio.get_running_loop()
+    created = []
+    for owner, toks in placements:
+        body = {"name": card_name, "idList": lists[owner]}
+        if due_iso:
+            body["due"] = due_iso
+        desc = build_desc(ctx.get("note"), interaction, toks, group)
+        if desc:
+            body["desc"] = desc
+        r = await loop.run_in_executor(None, partial(
+            _request_with_retry, "POST", f"{TRELLO_BASE}/cards",
+            **{"params": {"key": TRELLO_API_KEY, "token": TRELLO_TOKEN}, "json": body}
+        ))
+        created.append((owner, toks, r.json()))
+    invalidate_cache()
+    record_card_creation(interaction.user.id)
+    task_text = f"{cat_icon} {ctx.get('category','')} — {ctx['task']}"
+    for owner, toks, _card in created:
+        await notify_assignment(owner, task_text, due_display, interaction=interaction, assignees=toks or None)
+    return created
+
+def build_created_embed(ctx: dict, cat_icon: str, due_display, created: list):
+    multi = len(created) > 1
+    embed = discord.Embed(title="✅ สร้างงานใน Trello เรียบร้อยแล้ว", color=0x0052cc)
+    embed.add_field(name="การ์ดอยู่ในลิสต์" if multi else "สมาชิก",
+                    value=", ".join(f"{AVATARS.get(o,'')} {o}" for o, _, _ in created), inline=True)
+    if ctx.get("assignees"):
+        embed.add_field(name="ผู้รับผิดชอบ", value=", ".join(display_assignee(x) for x in ctx["assignees"]), inline=True)
+    embed.add_field(name="หัวข้อ", value=f"{cat_icon} {ctx.get('category','')}", inline=True)
+    embed.add_field(name="งาน", value=ctx["task"], inline=False)
+    if due_display:
+        embed.add_field(name="กำหนดส่ง", value=due_display, inline=True)
+    if ctx.get("note"):
+        embed.add_field(name="หมายเหตุ", value=ctx["note"], inline=False)
+    if multi:
+        embed.set_footer(text="สร้างการ์ดแยกให้แต่ละทีม ปิดงานแยกกัน และจะแจ้งคนสั่งเมื่อเสร็จครบทุกทีม")
+    link_view = discord.ui.View()
+    for owner, _, card in created:
+        link_view.add_item(discord.ui.Button(label=f"🔗 {owner}" if multi else "🔗 เปิดใน Trello",
+                                             url=card["url"], style=discord.ButtonStyle.link))
+    return embed, link_view
+
 # ── Custom modals ────────────────────────────────────────────────
 class CustomTimeModal(discord.ui.Modal, title="⏰ กรอกเวลาเอง"):
     เวลา = discord.ui.TextInput(
@@ -500,35 +589,8 @@ class CustomTimeModal(discord.ui.Modal, title="⏰ กรอกเวลาเ�
                     view=None
                 )
                 return
-            body = {"name": card_name, "idList": lists[ctx["member"]]}
-            if due_iso:
-                body["due"] = due_iso
-            desc = build_desc(ctx.get("note"), interaction, ctx.get("assignees"))
-            if desc:
-                body["desc"] = desc
-            loop = asyncio.get_running_loop()
-            r = await loop.run_in_executor(None, partial(
-                _request_with_retry, "POST",
-                f"{TRELLO_BASE}/cards",
-                **{"params": {"key": TRELLO_API_KEY, "token": TRELLO_TOKEN}, "json": body}
-            ))
-            card = r.json()
-            invalidate_cache()
-            record_card_creation(interaction.user.id)
-            await notify_assignment(ctx["member"], f"{cat_icon} {ctx.get('category','')} — {ctx['task']}", due_display, interaction=interaction,
-                                     assignees=ctx.get('assignees'))
-            embed = discord.Embed(title="✅ สร้างงานใน Trello เรียบร้อยแล้ว", color=0x0052cc)
-            embed.add_field(name="สมาชิก", value=f"{AVATARS.get(ctx['member'],'')} {ctx['member']}", inline=True)
-            if ctx.get("assignees"):
-                embed.add_field(name="ผู้รับผิดชอบ", value=", ".join(display_assignee(x) for x in ctx["assignees"]), inline=True)
-            embed.add_field(name="หัวข้อ", value=f"{cat_icon} {ctx.get('category','')}", inline=True)
-            embed.add_field(name="งาน", value=ctx["task"], inline=False)
-            if due_display:
-                embed.add_field(name="กำหนดส่ง", value=due_display, inline=True)
-            if ctx.get("note"):
-                embed.add_field(name="หมายเหตุ", value=ctx["note"], inline=False)
-            link_view = discord.ui.View()
-            link_view.add_item(trello_link_button(card["url"]))
+            created = await create_task_cards(interaction, ctx, card_name, due_iso, due_display, cat_icon, lists)
+            embed, link_view = build_created_embed(ctx, cat_icon, due_display, created)
             await interaction.edit_original_response(content=None, embed=embed, view=link_view)
         except Exception as e:
             await interaction.edit_original_response(content=f"❌ เกิดข้อผิดพลาด: {e}", view=None)
@@ -625,37 +687,8 @@ class TimeSelectView(discord.ui.View):
                 )
                 return
 
-            body = {"name": card_name, "idList": lists[ctx["member"]]}
-            if due_iso:
-                body["due"] = due_iso
-            desc = build_desc(ctx.get("note"), interaction, ctx.get("assignees"))
-            if desc:
-                body["desc"] = desc
-
-            loop = asyncio.get_running_loop()
-            r = await loop.run_in_executor(None, partial(
-                _request_with_retry, "POST",
-                f"{TRELLO_BASE}/cards",
-                **{"params": {"key": TRELLO_API_KEY, "token": TRELLO_TOKEN}, "json": body}
-            ))
-            card = r.json()
-            invalidate_cache()
-            record_card_creation(interaction.user.id)
-            await notify_assignment(ctx["member"], f"{cat_icon} {ctx.get('category','')} — {ctx['task']}", due_display, interaction=interaction,
-                                     assignees=ctx.get('assignees'))
-
-            embed = discord.Embed(title="✅ สร้างงานใน Trello เรียบร้อยแล้ว", color=0x0052cc)
-            embed.add_field(name="สมาชิก", value=f"{AVATARS.get(ctx['member'],'')} {ctx['member']}", inline=True)
-            if ctx.get("assignees"):
-                embed.add_field(name="ผู้รับผิดชอบ", value=", ".join(display_assignee(x) for x in ctx["assignees"]), inline=True)
-            embed.add_field(name="หัวข้อ", value=f"{cat_icon} {ctx.get('category','')}", inline=True)
-            embed.add_field(name="งาน", value=ctx["task"], inline=False)
-            if due_display:
-                embed.add_field(name="กำหนดส่ง", value=due_display, inline=True)
-            if ctx.get("note"):
-                embed.add_field(name="หมายเหตุ", value=ctx["note"], inline=False)
-            link_view = discord.ui.View()
-            link_view.add_item(trello_link_button(card["url"]))
+            created = await create_task_cards(interaction, ctx, card_name, due_iso, due_display, cat_icon, lists)
+            embed, link_view = build_created_embed(ctx, cat_icon, due_display, created)
             await interaction.followup.edit_message(interaction.message.id, content=None, embed=embed, view=link_view)
         except Exception as e:
             await interaction.followup.send(f"❌ เกิดข้อผิดพลาด: {e}")
@@ -806,28 +839,23 @@ class AssigneeSelectView(discord.ui.View):
         self._render()
         await interaction.response.edit_message(view=self)
 
-    def _owner(self) -> str:
-        """เจ้าของลิสต์: คนแรกที่เลือก ถ้าเลือกแต่ทีมใช้ลิสต์กลางของทีมแรก (ไม่มีก็คนแรกในทีม)"""
-        if self.sel_people:
-            return self.sel_people[0]
-        team = self.sel_teams[0]
-        shared = next((n for n, p in PEOPLE.items() if p["id"] is None and p["team"] == team and n in self.names), None)
-        return shared or next(n for n in self.people if PEOPLE[n]["team"] == team)
-
     async def _on_next(self, interaction: discord.Interaction):
         if not self.sel_teams and not self.sel_people:
             await interaction.response.send_message("เลือกทีมหรือคนอย่างน้อย 1 อย่างก่อนนะ", ephemeral=True)
             return
         if not self.sel_teams and len(self.sel_people) == 1:  # คนเดียว = งานปกติ
             owner, tokens = self.sel_people[0], []
-            who = owner
+            who, where = owner, owner
         else:
-            owner = self._owner()
             tokens = [f"ทีม:{t}" for t in self.sel_teams] + self.sel_people
+            pl = make_placements(tokens)
+            owner = pl[0][0]
             who = ", ".join(display_assignee(t) for t in tokens)
+            where = ", ".join(o for o, _ in pl)
+        extra = "\n🔗 สร้างการ์ดแยกให้แต่ละลิสต์ ปิดงานแยกกัน" if len(tokens) and len(make_placements(tokens)) > 1 else ""
         await interaction.response.edit_message(
             content=(f"**ขั้นตอน 2/5** — เลือกหัวข้องาน\n👥 ผู้รับผิดชอบ: **{who}**\n"
-                     f"📌 งานจะอยู่ในลิสต์ **{owner}**"),
+                     f"📌 การ์ดจะอยู่ในลิสต์: **{where}**{extra}"),
             view=CategorySelectView(member=owner, assignees=tokens)
         )
 
@@ -1183,7 +1211,8 @@ async def send_personal_summaries(now: datetime, h: int, mn: int, test: bool = F
             for shared_name, sp in PEOPLE.items():  # งานกลางของทีม (ลิสต์ที่ไม่มี Discord ID)
                 if sp["id"] is None and sp["team"] == PEOPLE[member]["team"]:
                     cards += await fetch_member_cards(shared_name)
-            cards = sort_by_due(cards)
+            seen_ids = set()
+            cards = sort_by_due([c for c in cards if not (c["id"] in seen_ids or seen_ids.add(c["id"]))])
             if not cards and not morning and not test:
                 continue  # รอบสายไม่รบกวนคนที่ไม่มีงานค้าง
             lines, overdue_n = [], 0
@@ -1746,7 +1775,7 @@ def split_desc(desc: str):
     desc = desc or ""
     m = REQUESTER_RE.search(desc)
     requester_id = int(m.group(1)) if m else None
-    note = ASSIGNEES_RE.sub("", re.split(r"\n*---\nสั่งโดย:", desc)[0]).strip()
+    note = GROUP_RE.sub("", ASSIGNEES_RE.sub("", re.split(r"\n*---\nสั่งโดย:", desc)[0])).strip()
     return note, requester_id
 
 def format_due_time(due: datetime) -> str:
