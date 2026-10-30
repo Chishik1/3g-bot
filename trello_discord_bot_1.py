@@ -25,8 +25,47 @@ TZ = pytz.timezone("Asia/Bangkok")
 NOTIFY_TIMES = [(10, 0), (12, 30), (18, 0)]  # ชั่วโมง, นาที
 
 # ── ข้อมูลสมาชิก (เพิ่ม/แก้ตรงนี้ที่เดียว) ──────────────────────
-AVATARS = {"โดม": "🟣", "ไอซ์": "🟢", "พี": "🟡", "4ก": "🔵", "กาย": "🟠"}
-MEMBERS = list(AVATARS.keys())
+# ชื่อ = ชื่อที่อยู่ในชื่อลิสต์ Trello ของคนนั้น, id = Discord user ID (4ก เป็นลิสต์กลาง ไม่มี id)
+PEOPLE = {
+    "โดม":    {"id": 1447848699718799390, "team": "กราฟิก",   "emoji": "🟣", "color": (155, 114, 207), "desc": "Web master, Support"},
+    "ไอซ์":   {"id": 1447848730781945876, "team": "กราฟิก",   "emoji": "🟢", "color": (46, 184, 114),  "desc": "Video, Support, Promotion Shopee, General Affairs"},
+    "พี":     {"id": 1448155823623639162, "team": "กราฟิก",   "emoji": "🟡", "color": (232, 179, 38),  "desc": "หน้าร้าน, เบรค, ADS, Event BIC, Merchandise, Support"},
+    "4ก":     {"id": None,                "team": "กราฟิก",   "emoji": "🔵", "color": (66, 133, 244),  "desc": "งานกลาง / มอบหมายร่วม"},
+    "กาย":    {"id": 1519904425672446073, "team": "กราฟิก",   "emoji": "🟠", "color": (240, 134, 52),  "desc": "Grading, Support, Information"},
+    "Best":   {"id": 1328671400726106125, "team": "วิดีโอ",    "emoji": "🔴", "color": (230, 70, 70),   "desc": "ทีมวิดีโอ"},
+    "Flow":   {"id": 1447853135665303673, "team": "วิดีโอ",    "emoji": "🩵", "color": (40, 170, 190),  "desc": "ทีมวิดีโอ"},
+    "ไอเซฟ":  {"id": 1519619421323264070, "team": "วิดีโอ",    "emoji": "🟤", "color": (140, 100, 70),  "desc": "ทีมวิดีโอ"},
+    "Stamp":  {"id": 1447873476462645350, "team": "คอนเทนต์", "emoji": "🩷", "color": (236, 110, 170), "desc": "ทีมคอนเทนต์"},
+    "SATANG": {"id": 1513433329268166726, "team": "คอนเทนต์", "emoji": "⚫", "color": (70, 75, 95),    "desc": "ทีมคอนเทนต์"},
+}
+AVATARS = {n: p["emoji"] for n, p in PEOPLE.items()}
+MEMBERS = list(PEOPLE.keys())
+MEMBER_DISCORD_IDS = {n: p["id"] for n, p in PEOPLE.items() if p["id"]}
+DISCORD_ID_TO_MEMBER = {v: k for k, v in MEMBER_DISCORD_IDS.items()}
+
+# เซิร์ฟเวอร์ที่ NOVA ใช้งาน: teams = ทีมที่เซิร์ฟเวอร์นั้นเห็น (สรุปงาน/ปฏิทิน/เมนู), notify_channel_id = ช่องแจ้งเตือนตามเวลา
+GUILDS = {
+    1447896845501337714: {"name": "4ก", "teams": {"กราฟิก"}, "notify_channel_id": NOTIFY_CHANNEL_ID},
+    1565566425098100897: {"name": "Digital Multimedia", "teams": {"กราฟิก", "วิดีโอ", "คอนเทนต์"},
+                          "notify_channel_id": 1565572815208456252},
+}
+
+def scope_names(guild_id) -> list:
+    """รายชื่อสมาชิกที่เซิร์ฟเวอร์นี้เห็น (DM หรือเซิร์ฟเวอร์ที่ไม่รู้จัก = เห็นทุกคน)"""
+    cfg = GUILDS.get(guild_id)
+    teams = cfg["teams"] if cfg else None
+    return [n for n, p in PEOPLE.items() if teams is None or p["team"] in teams]
+
+def notify_targets() -> list:
+    return [(gid, cfg["notify_channel_id"], scope_names(gid))
+            for gid, cfg in GUILDS.items() if cfg.get("notify_channel_id")]
+
+def member_options(names: list, with_desc: bool = False) -> list:
+    return [
+        discord.SelectOption(label=f"{PEOPLE[n]['emoji']} {n}", value=n,
+                             **({"description": PEOPLE[n]["desc"][:100]} if with_desc else {}))
+        for n in names
+    ]
 
 # ── Trello helpers ────────────────────────────────────────────────
 # แคชสั้นๆ กันยิง API ซ้ำตอนหลายคนกดพร้อมกัน / หลาย step ในคำสั่งเดียว
@@ -97,7 +136,7 @@ async def move_card(card_id, list_id):
     invalidate_cache()
     return result
 
-async def get_active_cards():
+async def get_active_cards(names: list = None):
     lists = await get_lists()
     done_ids = {v for k, v in lists.items() if "เสร็จ" in k}
     cards = await get_all_cards()
@@ -108,7 +147,7 @@ async def get_active_cards():
             continue
         list_name = list_id_to_name.get(card["idList"], "")
         member = next((m for m in MEMBERS if m in list_name), None)
-        if not member:
+        if not member or (names is not None and member not in names):
             continue
         if member not in result:
             result[member] = []
@@ -223,7 +262,7 @@ def record_card_creation(user_id: int):
 async def status_command(interaction: discord.Interaction):
     await interaction.response.defer()
     try:
-        active = await get_active_cards()
+        active = await get_active_cards(scope_names(interaction.guild_id))
         embed = discord.Embed(title="📋 งานที่ยังไม่เสร็จ",
                               color=0x7F77DD,
                               timestamp=datetime.now(TZ))
@@ -282,9 +321,6 @@ async def deadline_alert():
     alerted = set()
     while not client.is_closed():
         try:
-            channel = client.get_channel(NOTIFY_CHANNEL_ID)
-            if not channel:
-                channel = await client.fetch_channel(NOTIFY_CHANNEL_ID)
             now = datetime.now(TZ)
             cards = await get_all_cards()
             lists = await get_lists()
@@ -306,7 +342,8 @@ async def deadline_alert():
 
                 if 0 < diff_hours <= 24:
                     list_name = list_id_to_name.get(card["idList"], "")
-                    member = next((m for m in MEMBERS if m in list_name), "ทีม")
+                    owner = next((m for m in MEMBERS if m in list_name), None)
+                    member = owner or "ทีม"
 
                     embed = discord.Embed(
                         title="🚨 ใกล้ถึงกำหนดส่งแล้ว โปรดตรวจสอบงานนี้",
@@ -317,9 +354,14 @@ async def deadline_alert():
                     embed.add_field(name="เหลือเวลา", value=f"⏳ {int(diff_hours)} ชั่วโมงเท่านั้น!", inline=True)
                     embed.add_field(name="ครบกำหนด", value=due_dt.strftime("%-d/%-m/%Y %H:%M น."), inline=True)
 
-                    if channel:
-                        view = DeadlineDoneView(card_id=card["id"], card_url=card["url"])
-                        await channel.send(embed=embed, view=view)
+                    for _gid, cid, names in notify_targets():
+                        if owner is not None and owner not in names:
+                            continue  # งานของทีมที่เซิร์ฟเวอร์นี้ไม่เห็น
+                        try:
+                            channel = client.get_channel(cid) or await client.fetch_channel(cid)
+                            await channel.send(embed=embed, view=DeadlineDoneView(card_id=card["id"], card_url=card["url"]))
+                        except Exception as e:
+                            print(f"deadline send error (channel {cid}): {e}")
                     alerted.add(card["id"])
                     print(f"⚠️ แจ้งเตือน: {card['name']} เหลือ {int(diff_hours)} ชั่วโมง")
 
@@ -342,30 +384,28 @@ async def daily_notify():
             key = (today, h, mn)
             if now.hour == h and now.minute == mn and key not in last_sent:
                 last_sent.add(key)
-                try:
-                    channel = client.get_channel(NOTIFY_CHANNEL_ID)
-                    if not channel:
-                        channel = await client.fetch_channel(NOTIFY_CHANNEL_ID)
-                    active = await get_active_cards()
-                    embed = discord.Embed(
-                        title=f"⏰ สรุปงานประจำวัน — {now.strftime('%-H:%M น.')}",
-                        color=0xBA7517,
-                        timestamp=now
-                    )
-                    if not active:
-                        embed.description = "ไม่มีงานค้างเลย ดีเยี่ยม 🎉"
+                for _gid, cid, names in notify_targets():
+                    try:
+                        channel = client.get_channel(cid) or await client.fetch_channel(cid)
+                        active = await get_active_cards(names)
+                        embed = discord.Embed(
+                            title=f"⏰ สรุปงานประจำวัน — {now.strftime('%-H:%M น.')}",
+                            color=0xBA7517,
+                            timestamp=now
+                        )
+                        if not active:
+                            embed.description = "ไม่มีงานค้างเลย ดีเยี่ยม 🎉"
+                        else:
+                            for member, cards in active.items():
+                                val = "\n".join(f"• {c}" for c in cards)
+                                embed.add_field(
+                                    name=f"{AVATARS.get(member,'')} {member} ({len(cards)} งาน)",
+                                    value=val, inline=False
+                                )
                         await channel.send(embed=embed)
-                    else:
-                        for member, cards in active.items():
-                            val = "\n".join(f"• {c}" for c in cards)
-                            embed.add_field(
-                                name=f"{AVATARS.get(member,'')} {member} ({len(cards)} งาน)",
-                                value=val, inline=False
-                            )
-                        await channel.send(embed=embed)
-                    print(f"✓ แจ้งเตือนประจำเวลา {h}:{mn:02d} สำเร็จ")
-                except Exception as e:
-                    print(f"notify error: {e}")
+                        print(f"✓ แจ้งเตือนประจำเวลา {h}:{mn:02d} สำเร็จ (channel {cid})")
+                    except Exception as e:
+                        print(f"notify error (channel {cid}): {e}")
         await asyncio.sleep(30)
 
 # ══════════════════════════════════════════════════════════════════
@@ -675,15 +715,9 @@ class CategorySelectView(discord.ui.View):
 
 # ── Step 1: เลือกสมาชิก ─────────────────────────────────────────
 class MemberSelect(discord.ui.Select):
-    def __init__(self):
-        options = [
-            discord.SelectOption(label="🟣 โดม", value="โดม", description="Web master, Support"),
-            discord.SelectOption(label="🟢 ไอซ์", value="ไอซ์", description="Video, Support, Promotion Shopee, General Affairs"),
-            discord.SelectOption(label="🟡 พี",   value="พี",   description="หน้าร้าน, เบรค, ADS, Event BIC, Merchandise, Support"),
-            discord.SelectOption(label="🔵 4ก",   value="4ก",   description="งานกลาง / มอบหมายร่วม"),
-            discord.SelectOption(label="🟠 กาย",  value="กาย",  description="Grading, Support, Information"),
-        ]
-        super().__init__(placeholder="เลือกสมาชิกที่รับผิดชอบ...", options=options)
+    def __init__(self, names: list = None):
+        super().__init__(placeholder="เลือกสมาชิกที่รับผิดชอบ...",
+                         options=member_options(names or MEMBERS, with_desc=True))
 
     async def callback(self, interaction: discord.Interaction):
         member = self.values[0]
@@ -694,9 +728,9 @@ class MemberSelect(discord.ui.Select):
         )
 
 class MemberSelectView(discord.ui.View):
-    def __init__(self):
+    def __init__(self, names: list = None):
         super().__init__(timeout=60)
-        self.add_item(MemberSelect())
+        self.add_item(MemberSelect(names))
         add_cancel_button(self)
 
     async def on_timeout(self):
@@ -766,15 +800,8 @@ class TaskSelectView(discord.ui.View):
         pass
 
 class MemberForStatusSelect(discord.ui.Select):
-    def __init__(self):
-        options = [
-            discord.SelectOption(label="🟣 โดม", value="โดม"),
-            discord.SelectOption(label="🟢 ไอซ์", value="ไอซ์"),
-            discord.SelectOption(label="🟡 พี",   value="พี"),
-            discord.SelectOption(label="🔵 4ก",   value="4ก"),
-            discord.SelectOption(label="🟠 กาย",  value="กาย"),
-        ]
-        super().__init__(placeholder="เลือกสมาชิก...", options=options)
+    def __init__(self, names: list = None):
+        super().__init__(placeholder="เลือกสมาชิก...", options=member_options(names or MEMBERS))
 
     async def callback(self, interaction: discord.Interaction):
         member = self.values[0]
@@ -803,9 +830,9 @@ class MemberForStatusSelect(discord.ui.Select):
         )
 
 class MemberForStatusView(discord.ui.View):
-    def __init__(self):
+    def __init__(self, names: list = None):
         super().__init__(timeout=60)
-        self.add_item(MemberForStatusSelect())
+        self.add_item(MemberForStatusSelect(names))
         add_cancel_button(self)
 
     async def on_timeout(self):
@@ -813,9 +840,9 @@ class MemberForStatusView(discord.ui.View):
 
 @tree.command(name="changestatus", description="เปลี่ยนสถานะงานแบบเลือก dropdown")
 async def changestatus_command(interaction: discord.Interaction):
-    if not await require_graphics_team(interaction):
+    if not await require_team_member(interaction):
         return
-    view = MemberForStatusView()
+    view = MemberForStatusView(scope_names(interaction.guild_id))
     await interaction.response.send_message(
         "**🔄 เปลี่ยนสถานะงาน** — เลือกสมาชิกที่ต้องการอัปเดตสถานะ",
         view=view, ephemeral=True
@@ -823,13 +850,13 @@ async def changestatus_command(interaction: discord.Interaction):
 
 @tree.command(name="newcard", description="สร้างงานใหม่แบบ step-by-step")
 async def newcard_command(interaction: discord.Interaction):
-    if not is_graphics_team(interaction) and not check_rate_limit(interaction.user.id):
+    if not is_team_member(interaction) and not check_rate_limit(interaction.user.id):
         await interaction.response.send_message(
             f"⏳ คุณสร้างงานครบ {CARD_RATE_LIMIT} งานในชั่วโมงนี้แล้ว กรุณารอสักครู่แล้วลองใหม่",
             ephemeral=True
         )
         return
-    view = MemberSelectView()
+    view = MemberSelectView(scope_names(interaction.guild_id))
     await interaction.response.send_message(
         "**📋 สร้างงานใหม่** — มอบหมายงานนี้ให้ใคร?",
         view=view, ephemeral=True
@@ -885,13 +912,7 @@ class QuickDoneView(discord.ui.View):
         if cards:
             self.add_item(QuickDoneSelect(cards))
 
-MEMBER_CHOICES = [
-    app_commands.Choice(name="โดม", value="โดม"),
-    app_commands.Choice(name="ไอซ์", value="ไอซ์"),
-    app_commands.Choice(name="พี", value="พี"),
-    app_commands.Choice(name="4ก", value="4ก"),
-    app_commands.Choice(name="กาย", value="กาย"),
-]
+MEMBER_CHOICES = [app_commands.Choice(name=n, value=n) for n in PEOPLE]
 
 @tree.command(name="mywork", description="ดูงานของฉัน พร้อมกดเสร็จได้เลย")
 @app_commands.describe(ชื่อ="เลือกชื่อ (เว้นว่างไว้ = ดูของตัวเองอัตโนมัติ)")
@@ -937,19 +958,13 @@ async def mywork_command(interaction: discord.Interaction, ชื่อ: app_com
         await interaction.followup.send(f"❌ เกิดข้อผิดพลาด: {e}", ephemeral=True)
 
 # ── DM สรุปงานตอนเช้า ─────────────────────────────────────────────
-MEMBER_DISCORD_IDS = {
-    "โดม": 1447848699718799390,
-    "ไอซ์": 1447848730781945876,
-    "พี":   1448155823623639162,
-    "กาย":  1519904425672446073,
-}
-DISCORD_ID_TO_MEMBER = {v: k for k, v in MEMBER_DISCORD_IDS.items()}
 MORNING_DM_TIME = (10, 0)
 
 # ── การมอบหมายงานใหม่: DM แจ้งทันที (4ก = DM ทุกคนในทีมแยกกัน) ────
 async def notify_assignment(member: str, task_text: str, due_display: str = None,
                              interaction: discord.Interaction = None):
-    targets = list(MEMBER_DISCORD_IDS.keys()) if member == "4ก" else [member]
+    targets = ([n for n, p in PEOPLE.items() if p["team"] == "กราฟิก" and p["id"]]
+               if member == "4ก" else [member])
     for name in targets:
         uid = MEMBER_DISCORD_IDS.get(name)
         if not uid:
@@ -979,14 +994,14 @@ async def notify_assignment(member: str, task_text: str, due_display: str = None
         except Exception as e:
             print(f"notify_assignment error ({name}): {e}")
 
-# ── จำกัดสิทธิ์: /editcard, /changestatus ใช้ได้เฉพาะทีมกราฟิก ────
-def is_graphics_team(interaction: discord.Interaction) -> bool:
+# ── จำกัดสิทธิ์: /editcard, /changestatus ใช้ได้เฉพาะสมาชิกแผนก (ทุกคนในตาราง PEOPLE) ────
+def is_team_member(interaction: discord.Interaction) -> bool:
     return interaction.user.id in MEMBER_DISCORD_IDS.values()
 
-async def require_graphics_team(interaction: discord.Interaction) -> bool:
-    if not is_graphics_team(interaction):
+async def require_team_member(interaction: discord.Interaction) -> bool:
+    if not is_team_member(interaction):
         await interaction.response.send_message(
-            "❌ คำสั่งนี้ใช้ได้เฉพาะทีมกราฟิกเท่านั้น", ephemeral=True
+            "❌ คำสั่งนี้ใช้ได้เฉพาะสมาชิกในแผนกเท่านั้น", ephemeral=True
         )
         return False
     return True
@@ -1037,6 +1052,7 @@ async def overdue_command(interaction: discord.Interaction):
         cards = await get_all_cards()
         now = datetime.now(TZ)
 
+        names = scope_names(interaction.guild_id)
         overdue_items = []
         for card in cards:
             if card["idList"] in done_ids:
@@ -1048,6 +1064,8 @@ async def overdue_command(interaction: discord.Interaction):
                 continue
             list_name = list_id_to_name.get(card["idList"], "")
             member = next((m for m in MEMBERS if m in list_name), "?")
+            if member != "?" and member not in names:
+                continue
             diff = now - due_dt
             overdue_items.append({
                 "card": card,
@@ -1100,9 +1118,11 @@ async def search_command(interaction: discord.Interaction, คำค้น: str)
         list_id_to_name = {v: k for k, v in lists.items()}
         cards = await get_all_cards()
         keyword = คำค้น.strip().lower()
+        names = scope_names(interaction.guild_id)
         matches = [
             c for c in cards
-            if keyword in c.get("name", "").lower() or keyword in (c.get("desc") or "").lower()
+            if (keyword in c.get("name", "").lower() or keyword in (c.get("desc") or "").lower())
+            and _member_of_list(list_id_to_name.get(c["idList"], "")) in (None, *names)
         ]
         matches = sort_by_due(matches)
 
@@ -1460,12 +1480,8 @@ class EditCardSelectView(discord.ui.View):
         pass
 
 class EditMemberSelect(discord.ui.Select):
-    def __init__(self):
-        options = [
-            discord.SelectOption(label=f"{AVATARS.get(m,'')} {m}", value=m)
-            for m in MEMBERS
-        ]
-        super().__init__(placeholder="เลือกสมาชิก...", options=options)
+    def __init__(self, names: list = None):
+        super().__init__(placeholder="เลือกสมาชิก...", options=member_options(names or MEMBERS))
 
     async def callback(self, interaction: discord.Interaction):
         member = self.values[0]
@@ -1492,9 +1508,9 @@ class EditMemberSelectView(discord.ui.View):
 
 @tree.command(name="editcard", description="แก้ไขรายละเอียดงาน")
 async def editcard_command(interaction: discord.Interaction):
-    if not await require_graphics_team(interaction):
+    if not await require_team_member(interaction):
         return
-    view = EditMemberSelectView()
+    view = EditMemberSelectView(scope_names(interaction.guild_id))
     await interaction.response.send_message(
         "**✏️ แก้ไขงาน** — ต้องการแก้ไขงานของใคร?",
         view=view, ephemeral=True
@@ -1507,10 +1523,7 @@ THAI_MONTHS = ["มกราคม", "กุมภาพันธ์", "มี�
                "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม"]
 THAI_DOW_SHORT_SUN_FIRST = ["อา.", "จ.", "อ.", "พ.", "พฤ.", "ศ.", "ส."]
 THAI_DOW_FULL = ["จันทร์", "อังคาร", "พุธ", "พฤหัสบดี", "ศุกร์", "เสาร์", "อาทิตย์"]  # index = weekday()
-MEMBER_COLORS = {
-    "โดม": (155, 114, 207), "ไอซ์": (46, 184, 114), "พี": (232, 179, 38),
-    "4ก": (66, 133, 244), "กาย": (240, 134, 52),
-}
+MEMBER_COLORS = {n: p["color"] for n, p in PEOPLE.items()}
 UNASSIGNED_COLOR = (130, 130, 140)
 WEEKLY_DIGEST_HOUR = 9  # วันจันทร์ 09:00 น.
 
@@ -1559,7 +1572,7 @@ def split_desc(desc: str):
 def format_due_time(due: datetime) -> str:
     return "ทั้งวัน" if (due.hour, due.minute) == (23, 59) else due.strftime("%H:%M")
 
-async def get_calendar_items(member_filter: str = None) -> list:
+async def get_calendar_items(member_filter: str = None, names: list = None) -> list:
     """งานที่ยังไม่เสร็จและมี due date"""
     lists = await get_lists()
     done_ids = {v for k, v in lists.items() if "เสร็จ" in k}
@@ -1574,6 +1587,8 @@ async def get_calendar_items(member_filter: str = None) -> list:
             continue
         member = _member_of_list(list_id_to_name.get(card["idList"], ""))
         if member_filter and member != member_filter:
+            continue
+        if names is not None and member is not None and member not in names:
             continue
         category, title = split_category(card["name"])
         note, requester_id = split_desc(card.get("desc"))
@@ -1606,7 +1621,7 @@ def _wrap_text(text, font, max_width, max_lines=2):
     lines[max_lines - 1] = last + "…"
     return lines
 
-def render_month_png(year: int, month: int, items: list, member_filter: str = None) -> bytes:
+def render_month_png(year: int, month: int, items: list, member_filter: str = None, names: list = None) -> bytes:
     weeks = pycal.Calendar(firstweekday=6).monthdayscalendar(year, month)
     W, MARGIN, HEADER, DOW_H, CELL_H = 1800, 36, 130, 52, 235
     col_w = (W - 2 * MARGIN) // 7
@@ -1624,7 +1639,7 @@ def render_month_png(year: int, month: int, items: list, member_filter: str = No
            font=f_sub, fill=(110, 110, 125))
 
     lx = W - MARGIN
-    for name in reversed(list(MEMBER_COLORS.keys())):
+    for name in reversed([n for n in MEMBER_COLORS if names is None or n in names]):
         w = int(f_small.getlength(name)) + 38
         lx -= w
         d.ellipse((lx, MARGIN + 18, lx + 16, MARGIN + 34), fill=MEMBER_COLORS[name])
@@ -1691,14 +1706,14 @@ def render_month_png(year: int, month: int, items: list, member_filter: str = No
     img.save(buf, format="PNG")
     return buf.getvalue()
 
-async def build_calendar_message(year: int, month: int, member_filter: str = None):
-    items = await get_calendar_items(member_filter)
+async def build_calendar_message(year: int, month: int, member_filter: str = None, names: list = None):
+    items = await get_calendar_items(member_filter, names)
     loop = asyncio.get_running_loop()
-    png = await loop.run_in_executor(None, partial(render_month_png, year, month, items, member_filter))
+    png = await loop.run_in_executor(None, partial(render_month_png, year, month, items, member_filter, names))
     return discord.File(io.BytesIO(png), filename=f"calendar-{year}-{month:02d}.png"), items
 
-async def build_calendar_file(year: int, month: int, member_filter: str = None) -> discord.File:
-    file, _ = await build_calendar_message(year, month, member_filter)
+async def build_calendar_file(year: int, month: int, member_filter: str = None, names: list = None) -> discord.File:
+    file, _ = await build_calendar_message(year, month, member_filter, names)
     return file
 
 def _text_color_for(bg):
@@ -1708,7 +1723,7 @@ def _text_color_for(bg):
 def _week_start_of(day):
     return day - timedelta(days=day.weekday())  # จันทร์
 
-def render_week_png(week_start, items: list, member_filter: str = None) -> bytes:
+def render_week_png(week_start, items: list, member_filter: str = None, names: list = None) -> bytes:
     days = [week_start + timedelta(days=i) for i in range(7)]
     by_day = {dd: [] for dd in days}
     for it in items:
@@ -1740,7 +1755,7 @@ def render_week_png(week_start, items: list, member_filter: str = None) -> bytes
     d.text((MARGIN, MARGIN + 78), f"ปฏิทินงานรายสัปดาห์ • {sub} • เฉพาะงานที่ยังไม่เสร็จ • ดูรายละเอียดเต็มจากเมนูด้านล่างรูป",
            font=f_sub, fill=(110, 110, 125))
     lx = W - MARGIN
-    for name in reversed(list(MEMBER_COLORS.keys())):
+    for name in reversed([n for n in MEMBER_COLORS if names is None or n in names]):
         w = int(f_small.getlength(name)) + 38
         lx -= w
         d.ellipse((lx, MARGIN + 18, lx + 16, MARGIN + 34), fill=MEMBER_COLORS[name])
@@ -1790,10 +1805,10 @@ def render_week_png(week_start, items: list, member_filter: str = None) -> bytes
     img.save(buf, format="PNG")
     return buf.getvalue()
 
-async def build_week_message(week_start, member_filter: str = None):
-    items = await get_calendar_items(member_filter)
+async def build_week_message(week_start, member_filter: str = None, names: list = None):
+    items = await get_calendar_items(member_filter, names)
     loop = asyncio.get_running_loop()
-    png = await loop.run_in_executor(None, partial(render_week_png, week_start, items, member_filter))
+    png = await loop.run_in_executor(None, partial(render_week_png, week_start, items, member_filter, names))
     return discord.File(io.BytesIO(png), filename=f"calendar-week-{week_start.isoformat()}.png"), items
 
 def _week_caption(week_start, member_filter):
@@ -1879,8 +1894,9 @@ class DaySelect(discord.ui.Select):
         super().__init__(placeholder="เลือกวัน เพื่อดูรายละเอียดงาน...", options=options, row=1)
 
 class CalendarView(discord.ui.View):
-    def __init__(self, mode: str, year: int, month: int, week_start, member_filter: str, items: list):
+    def __init__(self, mode: str, year: int, month: int, week_start, member_filter: str, items: list, names: list = None):
         super().__init__(timeout=600)
+        self.names = names
         self.mode, self.year, self.month = mode, year, month
         self.week_start, self.member_filter = week_start, member_filter
         self._sync(items)
@@ -1898,8 +1914,8 @@ class CalendarView(discord.ui.View):
 
     async def _build(self):
         if self.mode == "week":
-            return await build_week_message(self.week_start, self.member_filter)
-        return await build_calendar_message(self.year, self.month, self.member_filter)
+            return await build_week_message(self.week_start, self.member_filter, self.names)
+        return await build_calendar_message(self.year, self.month, self.member_filter, self.names)
 
     def _sync(self, items: list):
         week = self.mode == "week"
@@ -1923,7 +1939,7 @@ class CalendarView(discord.ui.View):
         await interaction.response.defer(ephemeral=True)
         try:
             day = datetime.strptime(interaction.data["values"][0], "%Y-%m-%d").date()
-            items = await get_calendar_items(self.member_filter)
+            items = await get_calendar_items(self.member_filter, self.names)
             day_items = [i for i in items if i["due"].date() == day]
             await interaction.followup.send(
                 embed=build_day_embed(day.year, day.month, day.day, day_items), ephemeral=True
@@ -1983,7 +1999,7 @@ class CalendarView(discord.ui.View):
     async def btn_list(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer(ephemeral=True)
         try:
-            items = self._range_items(await get_calendar_items(self.member_filter))
+            items = self._range_items(await get_calendar_items(self.member_filter, self.names))
             chunks = build_agenda_chunks(items)
             for n, chunk in enumerate(chunks[:5]):
                 embed = discord.Embed(description=chunk, color=0x4285F4)
@@ -2011,7 +2027,8 @@ async def calendar_command(interaction: discord.Interaction,
     mode = มุมมอง.value if มุมมอง is not None else "month"
     now = datetime.now(TZ)
     try:
-        view = CalendarView(mode, now.year, now.month, _week_start_of(now.date()), member_filter, [])
+        view = CalendarView(mode, now.year, now.month, _week_start_of(now.date()), member_filter, [],
+                            scope_names(interaction.guild_id))
         file, items = await view._build()
         view._sync(items)
         await interaction.followup.send(content=view._caption(), file=file, view=view)
@@ -2042,15 +2059,15 @@ def build_week_embed(items: list, week_start, overdue_count: int) -> discord.Emb
         embed.set_footer(text=f"⚠️ มีงานเลยกำหนดค้างอยู่ {overdue_count} งาน ดูได้ที่ /overdue")
     return embed
 
-async def post_weekly_digest(channel):
+async def post_weekly_digest(channel, names: list = None):
     now = datetime.now(TZ)
     week_start = now.date() - timedelta(days=now.weekday())
     week_end = week_start + timedelta(days=6)
-    all_items = await get_calendar_items()
+    all_items = await get_calendar_items(None, names)
     week_items = [i for i in all_items if week_start <= i["due"].date() <= week_end]
     overdue = sum(1 for i in all_items if i["due"] < now)
     embed = build_week_embed(week_items, week_start, overdue)
-    file, _ = await build_week_message(week_start)
+    file, _ = await build_week_message(week_start, None, names)
     embed.set_image(url=f"attachment://{file.filename}")
     await channel.send(embed=embed, file=file)
 
@@ -2061,12 +2078,13 @@ async def weekly_calendar_digest():
         now = datetime.now(TZ)
         if now.weekday() == 0 and now.hour == WEEKLY_DIGEST_HOUR and last_sent_date != now.date():
             last_sent_date = now.date()
-            try:
-                channel = client.get_channel(NOTIFY_CHANNEL_ID) or await client.fetch_channel(NOTIFY_CHANNEL_ID)
-                await post_weekly_digest(channel)
-                print("✓ ส่งสรุปปฏิทินสัปดาห์แล้ว")
-            except Exception as e:
-                print(f"weekly digest error: {e}")
+            for _gid, cid, names in notify_targets():
+                try:
+                    channel = client.get_channel(cid) or await client.fetch_channel(cid)
+                    await post_weekly_digest(channel, names)
+                    print(f"✓ ส่งสรุปปฏิทินสัปดาห์แล้ว (channel {cid})")
+                except Exception as e:
+                    print(f"weekly digest error (channel {cid}): {e}")
         await asyncio.sleep(60)
 
 # ══════════════════════════════════════════════════════════════════
