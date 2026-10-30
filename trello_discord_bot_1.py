@@ -372,6 +372,25 @@ async def deadline_alert():
             print(f"deadline alert error: {e}")
         await asyncio.sleep(300)
 
+async def post_daily_summary(cid: int, names: list, now: datetime, title_prefix: str = ""):
+    channel = client.get_channel(cid) or await client.fetch_channel(cid)
+    active = await get_active_cards(names)
+    embed = discord.Embed(
+        title=f"{title_prefix}⏰ สรุปงานประจำวัน — {now.strftime('%-H:%M น.')}",
+        color=0xBA7517,
+        timestamp=now
+    )
+    if not active:
+        embed.description = "ไม่มีงานค้างเลย ดีเยี่ยม 🎉"
+    else:
+        for member, cards in active.items():
+            val = "\n".join(f"• {c}" for c in cards)
+            embed.add_field(
+                name=f"{AVATARS.get(member,'')} {member} ({len(cards)} งาน)",
+                value=val, inline=False
+            )
+    await channel.send(embed=embed)
+
 # ── background: daily notify (ใช้ last_sent กันยิงซ้ำ) ───────────
 async def daily_notify():
     await client.wait_until_ready()
@@ -386,23 +405,7 @@ async def daily_notify():
                 last_sent.add(key)
                 for _gid, cid, names in notify_targets():
                     try:
-                        channel = client.get_channel(cid) or await client.fetch_channel(cid)
-                        active = await get_active_cards(names)
-                        embed = discord.Embed(
-                            title=f"⏰ สรุปงานประจำวัน — {now.strftime('%-H:%M น.')}",
-                            color=0xBA7517,
-                            timestamp=now
-                        )
-                        if not active:
-                            embed.description = "ไม่มีงานค้างเลย ดีเยี่ยม 🎉"
-                        else:
-                            for member, cards in active.items():
-                                val = "\n".join(f"• {c}" for c in cards)
-                                embed.add_field(
-                                    name=f"{AVATARS.get(member,'')} {member} ({len(cards)} งาน)",
-                                    value=val, inline=False
-                                )
-                        await channel.send(embed=embed)
+                        await post_daily_summary(cid, names, now)
                         print(f"✓ แจ้งเตือนประจำเวลา {h}:{mn:02d} สำเร็จ (channel {cid})")
                     except Exception as e:
                         print(f"notify error (channel {cid}): {e}")
@@ -1007,13 +1010,13 @@ async def require_team_member(interaction: discord.Interaction) -> bool:
         return False
     return True
 
-async def send_personal_summaries(now: datetime, h: int, mn: int):
+async def send_personal_summaries(now: datetime, h: int, mn: int, test: bool = False):
     """DM สรุปงานของแต่ละคน (เฉพาะงานของคนนั้น) พร้อมกับรอบสรุปในช่อง"""
     morning = (h, mn) == MORNING_DM_TIME
     for member, uid in MEMBER_DISCORD_IDS.items():
         try:
             cards = sort_by_due(await fetch_member_cards(member))
-            if not cards and not morning:
+            if not cards and not morning and not test:
                 continue  # รอบสายไม่รบกวนคนที่ไม่มีงานค้าง
             lines, overdue_n = [], 0
             for c in cards:
@@ -1031,8 +1034,10 @@ async def send_personal_summaries(now: datetime, h: int, mn: int):
             text = "\n".join(lines)
             if len(text) > 3900:
                 text = text[:3900].rsplit("\n", 1)[0] + "\n…"
-            title = (f"☀️ สวัสดีตอนเช้า {member} มาดูงานวันนี้กัน" if morning
+            title = (f"☀️ สวัสดีตอนเช้า {member} มาดูงานวันนี้กัน" if morning and not test
                      else f"⏰ สรุปงานของคุณ — {now.strftime('%-H:%M น.')}")
+            if test:
+                title = "🧪 ทดสอบระบบ — " + title
             embed = discord.Embed(
                 title=title, description=text or "ไม่มีงานค้างเลย ดีเยี่ยม 🎉",
                 color=0xBA7517, timestamp=now
