@@ -161,8 +161,9 @@ async def get_active_cards(names: list = None):
             except Exception:
                 pass
         status = "🔄 กำลังทำ" if "กำลังทำ" in list_name else "📋 รอดำเนินการ"
-        who = parse_assignees(card.get("desc"))
-        who_str = f" 👥 {', '.join(who)}" if len(who) > 1 else ""
+        raw = parse_assignees(card.get("desc"))
+        who = [display_assignee(x) for x in raw]
+        who_str = f" 👥 {', '.join(who)}" if len(who) > 1 or (raw and raw[0].startswith("ทีม:")) else ""
         result[member].append(f"{status} {card['name']}{due_str}{who_str}")
     return result
 
@@ -176,7 +177,7 @@ async def fetch_member_cards(member: str):
         ln = list_id_to_name.get(c["idList"], "")
         if c["idList"] in done_ids:
             continue
-        if member in ln or member in parse_assignees(c.get("desc")):
+        if member in ln or member in expand_assignees(parse_assignees(c.get("desc"))):
             cards.append({**c, "list_name": ln})
     return cards
 
@@ -211,6 +212,19 @@ ASSIGNEES_RE = re.compile(r"^ผู้รับผิดชอบ:\s*(.+)$", re.
 def parse_assignees(desc: str) -> list:
     m = ASSIGNEES_RE.search(desc or "")
     return [x.strip() for x in m.group(1).split(",") if x.strip()] if m else []
+
+def expand_assignees(tokens: list) -> list:
+    """แปลงโทเคน 'ทีม:กราฟิก' เป็นสมาชิกทุกคนในทีม (ที่มี Discord ID) รวมกับรายบุคคล"""
+    out = []
+    for t in tokens or []:
+        if t.startswith("ทีม:"):
+            out += [n for n, p in PEOPLE.items() if p["team"] == t[4:] and p["id"]]
+        elif t in PEOPLE:
+            out.append(t)
+    return list(dict.fromkeys(out))
+
+def display_assignee(token: str) -> str:
+    return "ทีม" + token[4:] if token.startswith("ทีม:") else token
 
 def build_desc(note: str, interaction: discord.Interaction = None, assignees: list = None) -> str:
     parts = []
@@ -506,7 +520,7 @@ class CustomTimeModal(discord.ui.Modal, title="⏰ กรอกเวลาเ�
             embed = discord.Embed(title="✅ สร้างงานใน Trello เรียบร้อยแล้ว", color=0x0052cc)
             embed.add_field(name="สมาชิก", value=f"{AVATARS.get(ctx['member'],'')} {ctx['member']}", inline=True)
             if ctx.get("assignees"):
-                embed.add_field(name="ผู้รับผิดชอบ", value=", ".join(ctx["assignees"]), inline=True)
+                embed.add_field(name="ผู้รับผิดชอบ", value=", ".join(display_assignee(x) for x in ctx["assignees"]), inline=True)
             embed.add_field(name="หัวข้อ", value=f"{cat_icon} {ctx.get('category','')}", inline=True)
             embed.add_field(name="งาน", value=ctx["task"], inline=False)
             if due_display:
@@ -633,7 +647,7 @@ class TimeSelectView(discord.ui.View):
             embed = discord.Embed(title="✅ สร้างงานใน Trello เรียบร้อยแล้ว", color=0x0052cc)
             embed.add_field(name="สมาชิก", value=f"{AVATARS.get(ctx['member'],'')} {ctx['member']}", inline=True)
             if ctx.get("assignees"):
-                embed.add_field(name="ผู้รับผิดชอบ", value=", ".join(ctx["assignees"]), inline=True)
+                embed.add_field(name="ผู้รับผิดชอบ", value=", ".join(display_assignee(x) for x in ctx["assignees"]), inline=True)
             embed.add_field(name="หัวข้อ", value=f"{cat_icon} {ctx.get('category','')}", inline=True)
             embed.add_field(name="งาน", value=ctx["task"], inline=False)
             if due_display:
@@ -750,44 +764,71 @@ class MemberSelect(discord.ui.Select):
         )
 
 class AssigneeSelectView(discord.ui.View):
-    """งานเดียว ผู้รับผิดชอบหลายคน: คนแรกที่เลือก (ตามลำดับรายชื่อ) = เจ้าของลิสต์ ที่เหลือเป็นผู้ร่วมรับผิดชอบ"""
+    """เลือกผู้รับผิดชอบหลายคน: เลือกทั้งทีม และ/หรือรายบุคคลผสมกันได้ (ข้ามทีมได้)"""
     def __init__(self, names: list = None):
-        super().__init__(timeout=120)
-        self.candidates = [n for n in (names or MEMBERS) if PEOPLE[n]["id"]]
-        self.selected = []
+        super().__init__(timeout=180)
+        self.names = names or MEMBERS
+        self.people = [n for n in self.names if PEOPLE[n]["id"]]
+        self.teams = list(team_groups(self.people).keys())
+        self.sel_teams, self.sel_people = [], []
         self._render()
 
     def _render(self):
         self.clear_items()
-        options = [
-            discord.SelectOption(label=f"{PEOPLE[n]['emoji']} {n}", value=n,
-                                 description=f"ทีม{PEOPLE[n]['team']}", default=n in self.selected)
-            for n in self.candidates
-        ]
-        sel = discord.ui.Select(placeholder="เลือกผู้รับผิดชอบ (ตั้งแต่ 2 คนขึ้นไป)...",
-                                min_values=2, max_values=len(options), options=options)
-        sel.callback = self._on_pick
-        self.add_item(sel)
-        btn = discord.ui.Button(label="ถัดไป ▶", style=discord.ButtonStyle.primary, row=1)
-        btn.callback = self._on_next
-        self.add_item(btn)
+        team_opts = [discord.SelectOption(label=f"{TEAM_ICONS.get(t, '👥')} ทั้งทีม{t}", value=t,
+                                          description="ทุกคนในทีมได้รับงาน", default=t in self.sel_teams)
+                     for t in self.teams]
+        ts = discord.ui.Select(placeholder="เลือกทั้งทีม (เลือกได้หลายทีม)...", min_values=0,
+                               max_values=len(team_opts), options=team_opts, row=0)
+        ts.callback = self._on_teams
+        self.add_item(ts)
+        people_opts = [discord.SelectOption(label=f"{PEOPLE[n]['emoji']} {n}", value=n,
+                                            description=f"ทีม{PEOPLE[n]['team']}", default=n in self.sel_people)
+                       for n in self.people[:25]]
+        ps = discord.ui.Select(placeholder="เลือกรายบุคคล (เลือกได้หลายคน ข้ามทีมได้)...", min_values=0,
+                               max_values=len(people_opts), options=people_opts, row=1)
+        ps.callback = self._on_people
+        self.add_item(ps)
+        nxt = discord.ui.Button(label="ถัดไป ▶", style=discord.ButtonStyle.primary, row=2)
+        nxt.callback = self._on_next
+        self.add_item(nxt)
         add_cancel_button(self)
 
-    async def _on_pick(self, interaction: discord.Interaction):
+    async def _on_teams(self, interaction: discord.Interaction):
         chosen = set(interaction.data.get("values", []))
-        self.selected = [n for n in self.candidates if n in chosen]
+        self.sel_teams = [t for t in self.teams if t in chosen]
         self._render()
         await interaction.response.edit_message(view=self)
 
+    async def _on_people(self, interaction: discord.Interaction):
+        chosen = set(interaction.data.get("values", []))
+        self.sel_people = [n for n in self.people if n in chosen]
+        self._render()
+        await interaction.response.edit_message(view=self)
+
+    def _owner(self) -> str:
+        """เจ้าของลิสต์: คนแรกที่เลือก ถ้าเลือกแต่ทีมใช้ลิสต์กลางของทีมแรก (ไม่มีก็คนแรกในทีม)"""
+        if self.sel_people:
+            return self.sel_people[0]
+        team = self.sel_teams[0]
+        shared = next((n for n, p in PEOPLE.items() if p["id"] is None and p["team"] == team and n in self.names), None)
+        return shared or next(n for n in self.people if PEOPLE[n]["team"] == team)
+
     async def _on_next(self, interaction: discord.Interaction):
-        if len(self.selected) < 2:
-            await interaction.response.send_message("เลือกผู้รับผิดชอบอย่างน้อย 2 คนก่อนนะ", ephemeral=True)
+        if not self.sel_teams and not self.sel_people:
+            await interaction.response.send_message("เลือกทีมหรือคนอย่างน้อย 1 อย่างก่อนนะ", ephemeral=True)
             return
-        owner = self.selected[0]
+        if not self.sel_teams and len(self.sel_people) == 1:  # คนเดียว = งานปกติ
+            owner, tokens = self.sel_people[0], []
+            who = owner
+        else:
+            owner = self._owner()
+            tokens = [f"ทีม:{t}" for t in self.sel_teams] + self.sel_people
+            who = ", ".join(display_assignee(t) for t in tokens)
         await interaction.response.edit_message(
-            content=(f"**ขั้นตอน 2/5** — เลือกหัวข้องาน\n👥 ผู้รับผิดชอบ: **{', '.join(self.selected)}**\n"
-                     f"📌 งานจะอยู่ในลิสต์ของ **{owner}** (คนแรกที่เลือก)"),
-            view=CategorySelectView(member=owner, assignees=list(self.selected))
+            content=(f"**ขั้นตอน 2/5** — เลือกหัวข้องาน\n👥 ผู้รับผิดชอบ: **{who}**\n"
+                     f"📌 งานจะอยู่ในลิสต์ **{owner}**"),
+            view=CategorySelectView(member=owner, assignees=tokens)
         )
 
 TEAM_ORDER = ["กราฟิก", "วิดีโอ", "คอนเทนต์"]
@@ -804,9 +845,10 @@ def team_groups(names: list) -> dict:
 
 class TeamPickView(discord.ui.View):
     """ขั้นเลือกทีมก่อน แล้วค่อยแสดงรายชื่อคนในทีมนั้น (ใช้เมื่อเซิร์ฟเวอร์เห็นหลายทีม)"""
-    def __init__(self, names: list, make_view, intro: str):
+    def __init__(self, names: list, make_view, intro: str, multi_names: list = None):
         super().__init__(timeout=60)
         self.groups, self.make_view, self.intro = team_groups(names), make_view, intro
+        self.multi_names = multi_names
         options = [
             discord.SelectOption(label=f"{TEAM_ICONS.get(t, '👥')} ทีม{t}", value=t,
                                  description=f"{len(ns)} รายการ: " + ", ".join(ns)[:80])
@@ -815,7 +857,17 @@ class TeamPickView(discord.ui.View):
         sel = discord.ui.Select(placeholder="เลือกทีมก่อน...", options=options)
         sel.callback = self._on_team
         self.add_item(sel)
+        if multi_names:
+            multi = discord.ui.Button(label="👥 หลายคน / หลายทีม", style=discord.ButtonStyle.secondary, row=1)
+            multi.callback = self._on_multi
+            self.add_item(multi)
         add_cancel_button(self)
+
+    async def _on_multi(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(
+            content="**ขั้นตอน 1/5** — เลือกผู้รับผิดชอบ (ทั้งทีม และ/หรือรายบุคคลผสมกันได้)",
+            view=AssigneeSelectView(self.multi_names)
+        )
 
     async def _on_team(self, interaction: discord.Interaction):
         team = interaction.data["values"][0]
@@ -824,16 +876,18 @@ class TeamPickView(discord.ui.View):
             view=self.make_view(self.groups[team])
         )
 
-def member_flow_view(names: list, make_view, intro: str):
+def member_flow_view(names: list, make_view, intro: str, multi: bool = False):
     """เซิร์ฟเวอร์ที่เห็นหลายทีมเริ่มที่การเลือกทีม ส่วนทีมเดียวไปเลือกคนได้เลย"""
-    return TeamPickView(names, make_view, intro) if len(team_groups(names)) > 1 else make_view(names)
+    if len(team_groups(names)) > 1:
+        return TeamPickView(names, make_view, intro, multi_names=names if multi else None)
+    return make_view(names)
 
 class MemberSelectView(discord.ui.View):
     def __init__(self, names: list = None, all_names: list = None):
         super().__init__(timeout=60)
         self.names = all_names or names  # ปุ่ม "หลายคน" เลือกข้ามทีมได้
         self.add_item(MemberSelect(names))
-        multi = discord.ui.Button(label="👥 มีผู้รับผิดชอบหลายคน", style=discord.ButtonStyle.secondary, row=1)
+        multi = discord.ui.Button(label="👥 หลายคน / หลายทีม", style=discord.ButtonStyle.secondary, row=1)
         multi.callback = self._on_multi
         self.add_item(multi)
         add_cancel_button(self)
@@ -966,7 +1020,7 @@ async def newcard_command(interaction: discord.Interaction):
         return
     intro = "**📋 สร้างงานใหม่** — มอบหมายงานนี้ให้ใคร?"
     names = scope_names(interaction.guild_id)
-    view = member_flow_view(names, lambda ns: MemberSelectView(ns, all_names=names), intro)
+    view = member_flow_view(names, lambda ns: MemberSelectView(ns, all_names=names), intro, multi=True)
     await interaction.response.send_message(intro, view=view, ephemeral=True)
 
 # ── /mywork: ดูงานตัวเอง + ปุ่มกดเสร็จ ──────────────────────────
@@ -1072,7 +1126,7 @@ async def notify_assignment(member: str, task_text: str, due_display: str = None
                              interaction: discord.Interaction = None, assignees: list = None):
     shared = PEOPLE.get(member)
     if assignees:  # เลือกผู้รับผิดชอบหลายคน: DM ทุกคนที่ถูกเลือก
-        targets = [n for n in assignees if n in MEMBER_DISCORD_IDS]
+        targets = [n for n in expand_assignees(assignees) if n in MEMBER_DISCORD_IDS]
     elif shared and shared["id"] is None:  # ลิสต์กลาง: ทุกคนในทีม
         targets = [n for n, p in PEOPLE.items() if p["team"] == shared["team"] and p["id"]]
     else:
@@ -1090,8 +1144,8 @@ async def notify_assignment(member: str, task_text: str, due_display: str = None
             )
             if due_display:
                 embed.add_field(name="กำหนดส่ง", value=due_display, inline=True)
-            if assignees and len(assignees) > 1:
-                embed.add_field(name="ผู้รับผิดชอบร่วม", value=", ".join(assignees), inline=True)
+            if assignees and (len(assignees) > 1 or assignees[0].startswith("ทีม:")):
+                embed.add_field(name="ผู้รับผิดชอบร่วม", value=", ".join(display_assignee(x) for x in assignees), inline=True)
             if interaction is not None:
                 creator = interaction.user
                 embed.add_field(name="สร้างโดย", value=creator.mention, inline=True)
@@ -1966,7 +2020,7 @@ def build_day_embed(year: int, month: int, day: int, day_items: list) -> discord
     total_chars, shown = 0, 0
     for it in day_items:
         parts = [f"ผู้รับผิดชอบ: {AVATARS.get(it['member'], '⚪')} {it['member'] or 'ยังไม่ระบุ'}"]
-        co = [n for n in it.get("assignees", []) if n != it["member"]]
+        co = [display_assignee(n) for n in it.get("assignees", []) if n != it["member"]]
         if co:
             parts[0] += f" • ร่วมกับ: {', '.join(co)}"
         if it["category"]:
