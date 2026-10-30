@@ -124,22 +124,6 @@ async def get_active_cards():
         result[member].append(f"{status} {card['name']}{due_str}")
     return result
 
-async def get_active_cards_raw() -> list:
-    lists = await get_lists()
-    done_ids = {v for k, v in lists.items() if "เสร็จ" in k}
-    cards = await get_all_cards()
-    list_id_to_name = {v: k for k, v in lists.items()}
-    result = []
-    for card in cards:
-        if card["idList"] in done_ids:
-            continue
-        list_name = list_id_to_name.get(card["idList"], "")
-        member = next((m for m in MEMBERS if m in list_name), None)
-        if not member:
-            continue
-        result.append(card)
-    return result
-
 async def fetch_member_cards(member: str):
     lists = await get_lists()
     done_ids = {v for k, v in lists.items() if "เสร็จ" in k}
@@ -254,17 +238,20 @@ async def status_command(interaction: discord.Interaction):
     except Exception as e:
         await interaction.followup.send(f"❌ เกิดข้อผิดพลาด: {e}")
 
-# หมายเหตุ: view นี้ timeout=None แต่ยังไม่ persistent ข้าม redeploy จริง
-# (ต้องใช้ discord.ui.DynamicItem ถึงจะรอด restart) — ถ้าบอท redeploy
-# ระหว่างที่ข้อความค้างอยู่ ปุ่มจะกดไม่ติด ต้องไปกดเสร็จผ่าน /mywork แทน
-class DeadlineDoneView(discord.ui.View):
-    def __init__(self, card_id: str, card_url: str):
-        super().__init__(timeout=None)
+class DoneCardButton(discord.ui.DynamicItem[discord.ui.Button],
+                     template=r"nova:done:(?P<card_id>[0-9a-f]{24})"):
+    """ปุ่ม 'เสร็จแล้ว' บนข้อความแจ้งเตือน deadline — custom_id มี card id จึงกดได้แม้บอทรีสตาร์ท"""
+    def __init__(self, card_id: str):
+        super().__init__(discord.ui.Button(
+            label="✅ เสร็จแล้ว", style=discord.ButtonStyle.success, custom_id=f"nova:done:{card_id}"
+        ))
         self.card_id = card_id
-        self.add_item(trello_link_button(card_url))
 
-    @discord.ui.button(label="✅ เสร็จแล้ว", style=discord.ButtonStyle.success)
-    async def btn_done(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @classmethod
+    async def from_custom_id(cls, interaction: discord.Interaction, item: discord.ui.Button, match, /):
+        return cls(match["card_id"])
+
+    async def callback(self, interaction: discord.Interaction):
         await interaction.response.defer()
         try:
             lists = await get_lists()
@@ -274,11 +261,20 @@ class DeadlineDoneView(discord.ui.View):
                 return
             await move_card(self.card_id, target)
             await notify_requester_done(self.card_id, completer_id=interaction.user.id)
-            button.disabled = True
-            button.label = "✅ เสร็จแล้ว!"
-            await interaction.message.edit(view=self)
+            view = discord.ui.View.from_message(interaction.message, timeout=None)
+            for child in view.children:
+                if getattr(child, "custom_id", None) == self.item.custom_id:
+                    child.disabled = True
+                    child.label = "✅ เสร็จแล้ว!"
+            await interaction.message.edit(view=view)
         except Exception as e:
             await interaction.followup.send(f"❌ เกิดข้อผิดพลาด: {e}", ephemeral=True)
+
+class DeadlineDoneView(discord.ui.View):
+    def __init__(self, card_id: str, card_url: str):
+        super().__init__(timeout=None)
+        self.add_item(trello_link_button(card_url))
+        self.add_item(DoneCardButton(card_id))
 
 # ── background: deadline alert (เช็คทุก 5 นาที) ──────────────────
 async def deadline_alert():
@@ -366,11 +362,7 @@ async def daily_notify():
                                 name=f"{AVATARS.get(member,'')} {member} ({len(cards)} งาน)",
                                 value=val, inline=False
                             )
-                        active_raw = await get_active_cards_raw()
-                        if len(active_raw) > 25:
-                            embed.set_footer(text=f"เมนูเลือกกดเสร็จด้านล่างแสดงได้ 25 จาก {len(active_raw)} งาน เรียงตามกำหนดส่ง")
-                        view = QuickDoneView(active_raw)
-                        await channel.send(embed=embed, view=view)
+                        await channel.send(embed=embed)
                     print(f"✓ แจ้งเตือนประจำเวลา {h}:{mn:02d} สำเร็จ")
                 except Exception as e:
                     print(f"notify error: {e}")
@@ -844,37 +836,54 @@ async def newcard_command(interaction: discord.Interaction):
     )
 
 # ── /mywork: ดูงานตัวเอง + ปุ่มกดเสร็จ ──────────────────────────
+QUICKDONE_ID = "nova:quickdone"
+
+def _quickdone_pairs(message) -> list:
+    """อ่านตัวเลือกที่ยังเหลืออยู่จากเมนูบนข้อความ (label, card_id)"""
+    for row in getattr(message, "components", None) or []:
+        for comp in getattr(row, "children", []):
+            if getattr(comp, "custom_id", None) == QUICKDONE_ID:
+                return [(o.label, o.value) for o in comp.options]
+    return []
+
 class QuickDoneSelect(discord.ui.Select):
     def __init__(self, cards: list):
         options = [
             discord.SelectOption(label=c["name"][:90], value=c["id"])
             for c in sort_by_due(cards)[:25]
         ]
-        super().__init__(placeholder="เลือกงานที่ทำเสร็จแล้ว...", options=options)
+        super().__init__(placeholder="เลือกงานที่ทำเสร็จแล้ว...", options=options, custom_id=QUICKDONE_ID)
 
     async def callback(self, interaction: discord.Interaction):
         card_id = self.values[0]
-        card_name = next(o.label for o in self.options if o.value == card_id)
+        private = bool(interaction.message and interaction.message.flags.ephemeral)
         await interaction.response.defer()
         try:
+            card_name = next((c["name"] for c in await get_all_cards() if c["id"] == card_id), card_id)
             lists = await get_lists()
             done_list = next((v for k, v in lists.items() if "เสร็จ" in k), None)
             await move_card(card_id, done_list)
             await notify_requester_done(card_id, card_name, completer_id=interaction.user.id)
+            if private:  # /mywork ส่วนตัว: แทนที่ด้วยข้อความยืนยัน
+                await interaction.edit_original_response(
+                    content=f"✅ **{card_name}** → เสร็จสมบูรณ์แล้ว 🎉", view=None
+                )
+                return
+            # ข้อความสาธารณะ (สรุปประจำวัน/overdue): เอางานที่เสร็จออกจากเมนู คนอื่นยังเลือกต่อได้
+            remaining = [{"id": v, "name": l} for l, v in _quickdone_pairs(interaction.message) if v != card_id]
             await interaction.edit_original_response(
-                content=f"✅ **{card_name}** → เสร็จสมบูรณ์แล้ว 🎉", view=None
+                view=QuickDoneView(remaining, persistent=True) if remaining else None
             )
+            await interaction.followup.send(f"✅ **{interaction.user.display_name}** ทำ **{card_name}** เสร็จแล้ว 🎉")
         except Exception as e:
-            await interaction.edit_original_response(content=f"❌ เกิดข้อผิดพลาด: {e}", view=None)
+            await interaction.followup.send(f"❌ เกิดข้อผิดพลาด: {e}", ephemeral=True)
 
 class QuickDoneView(discord.ui.View):
-    def __init__(self, cards: list):
-        super().__init__(timeout=120)
+    def __init__(self, cards: list, persistent: bool = False):
+        # ข้อความสาธารณะต้องกดได้ตลอด (persistent) ส่วน /mywork ส่วนตัวหมดอายุใน 2 นาที
+        super().__init__(timeout=None if persistent else 120)
         if cards:
             self.add_item(QuickDoneSelect(cards))
-
-    async def on_timeout(self):
-        pass
 
 MEMBER_CHOICES = [
     app_commands.Choice(name="โดม", value="โดม"),
@@ -1071,7 +1080,7 @@ async def overdue_command(interaction: discord.Interaction):
                 )
             if len(overdue_items) > 25:
                 embed.set_footer(text=f"เมนูเลือกกดเสร็จด้านล่างแสดงได้ 25 จาก {len(overdue_items)} งาน เรียงจากเลยกำหนดมากสุด")
-            view = QuickDoneView([item["card"] for item in overdue_items])
+            view = QuickDoneView([item["card"] for item in overdue_items], persistent=True)
             await interaction.followup.send(embed=embed, view=view)
             return
         await interaction.followup.send(embed=embed)
@@ -2232,6 +2241,8 @@ async def on_ready():
     print("🗓️ เปิดระบบสรุปปฏิทินสัปดาห์ทุกเช้าวันจันทร์แล้ว")
 
 async def main():
+    client.add_dynamic_items(DoneCardButton)
+    client.add_view(QuickDoneView([{"id": "0", "name": "-"}], persistent=True))
     async with client:
         await client.start(DISCORD_TOKEN)
 
