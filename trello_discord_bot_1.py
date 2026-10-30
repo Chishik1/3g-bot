@@ -406,6 +406,7 @@ async def daily_notify():
                         print(f"✓ แจ้งเตือนประจำเวลา {h}:{mn:02d} สำเร็จ (channel {cid})")
                     except Exception as e:
                         print(f"notify error (channel {cid}): {e}")
+                await send_personal_summaries(now, h, mn)
         await asyncio.sleep(30)
 
 # ══════════════════════════════════════════════════════════════════
@@ -1006,37 +1007,45 @@ async def require_team_member(interaction: discord.Interaction) -> bool:
         return False
     return True
 
-async def morning_dm():
-    await client.wait_until_ready()
-    last_dm_date = None
-    while not client.is_closed():
-        now = datetime.now(TZ)
-        today = now.date()
-        if now.hour == MORNING_DM_TIME[0] and now.minute == MORNING_DM_TIME[1] and last_dm_date != today:
-            last_dm_date = today
-            for member, uid in MEMBER_DISCORD_IDS.items():
-                try:
-                    cards = await fetch_member_cards(member)
-                    user = await client.fetch_user(uid)
-                    embed = discord.Embed(
-                        title=f"☀️ สวัสดีตอนเช้า {member} มาดูงานกันนะ",
-                        description="งานของคุณวันนี้" if cards else "ไม่มีงานค้างเลย ดีเยี่ยม 🎉",
-                        color=0xBA7517, timestamp=now
-                    )
-                    for c in cards:
-                        due = ""
-                        if c.get("due"):
-                            try:
-                                dd = datetime.fromisoformat(c["due"].replace("Z", "+00:00")).astimezone(TZ)
-                                due = f" (ครบ {dd.strftime('%-d/%-m %H:%M')} น.)"
-                            except Exception:
-                                pass
-                        embed.add_field(name=c["name"], value=f"{c['list_name']}{due}", inline=False)
-                    await user.send(embed=embed)
-                    print(f"✓ ส่ง DM เช้าให้ {member} แล้ว")
-                except Exception as e:
-                    print(f"morning dm error ({member}): {e}")
-        await asyncio.sleep(30)
+async def send_personal_summaries(now: datetime, h: int, mn: int):
+    """DM สรุปงานของแต่ละคน (เฉพาะงานของคนนั้น) พร้อมกับรอบสรุปในช่อง"""
+    morning = (h, mn) == MORNING_DM_TIME
+    for member, uid in MEMBER_DISCORD_IDS.items():
+        try:
+            cards = sort_by_due(await fetch_member_cards(member))
+            if not cards and not morning:
+                continue  # รอบสายไม่รบกวนคนที่ไม่มีงานค้าง
+            lines, overdue_n = [], 0
+            for c in cards:
+                due, overdue = "", False
+                if c.get("due"):
+                    try:
+                        dd = datetime.fromisoformat(c["due"].replace("Z", "+00:00")).astimezone(TZ)
+                        due = f" *(ครบ {dd.strftime('%-d/%-m %H:%M')} น.)*"
+                        overdue = dd < now
+                    except Exception:
+                        pass
+                overdue_n += overdue
+                status = "⚠️" if overdue else ("🔄" if "กำลังทำ" in c["list_name"] else "📋")
+                lines.append(f"{status} {c['name']}{due}")
+            text = "\n".join(lines)
+            if len(text) > 3900:
+                text = text[:3900].rsplit("\n", 1)[0] + "\n…"
+            title = (f"☀️ สวัสดีตอนเช้า {member} มาดูงานวันนี้กัน" if morning
+                     else f"⏰ สรุปงานของคุณ — {now.strftime('%-H:%M น.')}")
+            embed = discord.Embed(
+                title=title, description=text or "ไม่มีงานค้างเลย ดีเยี่ยม 🎉",
+                color=0xBA7517, timestamp=now
+            )
+            foot = f"{len(cards)} งานที่ยังไม่เสร็จ"
+            if overdue_n:
+                foot += f" • เลยกำหนด {overdue_n} งาน"
+            embed.set_footer(text=foot + " • ดูเพิ่มด้วย /mywork")
+            user = client.get_user(uid) or await client.fetch_user(uid)
+            await user.send(embed=embed)
+            print(f"✓ ส่ง DM สรุปให้ {member} แล้ว ({h}:{mn:02d})")
+        except Exception as e:
+            print(f"personal summary error ({member}): {e}")
 
 # ══════════════════════════════════════════════════════════════════
 # /overdue — โชว์งานที่เลยกำหนดแล้วยังไม่เสร็จ
@@ -2250,11 +2259,10 @@ async def on_ready():
     print(f"⏰ แจ้งเตือนทุกวัน เวลา 10:00, 12:30, 18:00 น.")
     client.loop.create_task(daily_notify())
     client.loop.create_task(deadline_alert())
-    client.loop.create_task(morning_dm())
     client.loop.create_task(review_escalation())
     client.loop.create_task(weekly_calendar_digest())
     print("🚨 เปิดระบบแจ้งเตือน deadline ล่วงหน้า 24 ชั่วโมงแล้ว")
-    print("☀️ เปิดระบบ DM สรุปงานตอนเช้า 10:00 น. แล้ว")
+    print("☀️ เปิดระบบ DM สรุปงานส่วนตัว 10:00 / 12:30 / 18:00 น. แล้ว")
     print("🖼️ เปิดระบบแจ้งเตือนตรวจสอบรูปแล้ว")
     print("🗓️ เปิดระบบสรุปปฏิทินสัปดาห์ทุกเช้าวันจันทร์แล้ว")
 
