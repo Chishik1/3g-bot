@@ -344,6 +344,26 @@ def check_rate_limit(user_id: int) -> bool:
 def record_card_creation(user_id: int):
     _card_create_log.setdefault(user_id, []).append(time.time())
 
+def add_lines_fields(embed: discord.Embed, name: str, lines: list):
+    """ใส่รายการเป็น field โดยแบ่งเป็นหลาย field เมื่อยาวเกิน 1024 ตัวอักษร (ขีดจำกัดของ Discord)
+    และไม่ให้ embed เกิน 25 field / 6000 ตัวอักษรรวม — ส่วนที่เกินจะแจ้งไว้ใน footer"""
+    chunks, cur = [], ""
+    for line in lines:
+        line = line if len(line) <= 1000 else line[:997] + "…"
+        if cur and len(cur) + len(line) + 1 > 1024:
+            chunks.append(cur)
+            cur = line
+        else:
+            cur = f"{cur}\n{line}" if cur else line
+    if cur:
+        chunks.append(cur)
+    for i, chunk in enumerate(chunks):
+        fname = name if i == 0 else f"{name} (ต่อ)"
+        if len(embed.fields) >= 25 or len(embed) + len(fname) + len(chunk) > 5800:
+            embed.set_footer(text="แสดงไม่ครบทุกงาน — ดูของตัวเองทั้งหมดได้ที่ /mywork")
+            return
+        embed.add_field(name=fname, value=chunk, inline=False)
+
 # ── /status ───────────────────────────────────────────────────────
 @tree.command(name="status", description="ดูสรุปงานของทีมตอนนี้")
 async def status_command(interaction: discord.Interaction):
@@ -357,9 +377,8 @@ async def status_command(interaction: discord.Interaction):
             embed.description = "ยอดเยี่ยม ไม่มีงานค้างอยู่เลย 🎉"
         else:
             for member, cards in active.items():
-                val = "\n".join(f"• {c}" for c in cards) or "ไม่มีงาน"
-                embed.add_field(name=f"{AVATARS.get(member,'')} {member} ({len(cards)} งาน)",
-                                value=val, inline=False)
+                add_lines_fields(embed, f"{AVATARS.get(member,'')} {member} ({len(cards)} งาน)",
+                                 [f"• {c}" for c in cards] or ["ไม่มีงาน"])
         await interaction.followup.send(embed=embed)
     except Exception as e:
         await interaction.followup.send(f"❌ เกิดข้อผิดพลาด: {e}")
@@ -470,11 +489,8 @@ async def post_daily_summary(cid: int, names: list, now: datetime, title_prefix:
         embed.description = "ไม่มีงานค้างเลย ดีเยี่ยม 🎉"
     else:
         for member, cards in active.items():
-            val = "\n".join(f"• {c}" for c in cards)
-            embed.add_field(
-                name=f"{AVATARS.get(member,'')} {member} ({len(cards)} งาน)",
-                value=val, inline=False
-            )
+            add_lines_fields(embed, f"{AVATARS.get(member,'')} {member} ({len(cards)} งาน)",
+                             [f"• {c}" for c in cards])
     await channel.send(embed=embed)
 
 # ── background: daily notify (ใช้ last_sent กันยิงซ้ำ) ───────────
@@ -1345,11 +1361,8 @@ async def overdue_command(interaction: discord.Interaction):
                 for item in items:
                     late = f"{item['days']} วัน" if item["days"] >= 1 else f"{item['hours']} ชม."
                     lines.append(f"• ⚠️ {item['card']['name']} *(เลยมา {late})*")
-                embed.add_field(
-                    name=f"{AVATARS.get(member,'')} {member} ({len(items)} งาน)",
-                    value="\n".join(lines), inline=False
-                )
-            if len(overdue_items) > 25:
+                add_lines_fields(embed, f"{AVATARS.get(member,'')} {member} ({len(items)} งาน)", lines)
+            if len(overdue_items) > 25 and not embed.footer.text:
                 embed.set_footer(text=f"เมนูเลือกกดเสร็จด้านล่างแสดงได้ 25 จาก {len(overdue_items)} งาน เรียงจากเลยกำหนดมากสุด")
             view = QuickDoneView([item["card"] for item in overdue_items], persistent=True)
             await interaction.followup.send(embed=embed, view=view)
