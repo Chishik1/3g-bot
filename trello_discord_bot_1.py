@@ -684,7 +684,7 @@ class TimeSelectView(discord.ui.View):
     TIMES = ["9:00", "10:00", "12:00", "15:00", "18:00", "ไม่ระบุ"]
 
     def __init__(self, ctx: dict):
-        super().__init__(timeout=120)
+        super().__init__(timeout=600)
         self.ctx = ctx
         for t in self.TIMES:
             self.add_item(self._make_btn(t))
@@ -755,7 +755,7 @@ class TimeSelectView(discord.ui.View):
 # ── Step 3: เลือกวันที่ ──────────────────────────────────────────
 class DateSelectView(discord.ui.View):
     def __init__(self, ctx: dict):
-        super().__init__(timeout=120)
+        super().__init__(timeout=600)
         self.ctx = ctx
         now = datetime.now(TZ)
         labels = ["วันนี้", "พรุ่งนี้", "+2 วัน", "+3 วัน", "+7 วัน", "ไม่ระบุ"]
@@ -834,7 +834,7 @@ class CategorySelect(discord.ui.Select):
 
 class CategorySelectView(discord.ui.View):
     def __init__(self, member: str, assignees: list = None):
-        super().__init__(timeout=60)
+        super().__init__(timeout=600)
         self.add_item(CategorySelect(member=member, assignees=assignees))
         add_cancel_button(self)
 
@@ -858,7 +858,7 @@ class MemberSelect(discord.ui.Select):
 class AssigneeSelectView(discord.ui.View):
     """เลือกผู้รับผิดชอบหลายคน: เลือกทั้งทีม และ/หรือรายบุคคลผสมกันได้ (ข้ามทีมได้)"""
     def __init__(self, names: list = None):
-        super().__init__(timeout=180)
+        super().__init__(timeout=600)
         self.names = names or MEMBERS
         self.people = [n for n in self.names if PEOPLE[n]["id"]]
         self.teams = list(team_groups(self.people).keys())
@@ -933,7 +933,7 @@ def team_groups(names: list) -> dict:
 class TeamPickView(discord.ui.View):
     """ขั้นเลือกทีมก่อน แล้วค่อยแสดงรายชื่อคนในทีมนั้น (ใช้เมื่อเซิร์ฟเวอร์เห็นหลายทีม)"""
     def __init__(self, names: list, make_view, intro: str, multi_names: list = None):
-        super().__init__(timeout=60)
+        super().__init__(timeout=600)
         self.groups, self.make_view, self.intro = team_groups(names), make_view, intro
         self.multi_names = multi_names
         options = [
@@ -971,7 +971,7 @@ def member_flow_view(names: list, make_view, intro: str, multi: bool = False):
 
 class MemberSelectView(discord.ui.View):
     def __init__(self, names: list = None, all_names: list = None):
-        super().__init__(timeout=60)
+        super().__init__(timeout=600)
         self.names = all_names or names  # ปุ่ม "หลายคน" เลือกข้ามทีมได้
         self.add_item(MemberSelect(names))
         multi = discord.ui.Button(label="👥 หลายคน / หลายทีม", style=discord.ButtonStyle.secondary, row=1)
@@ -1011,7 +1011,7 @@ class TaskStatusSelect(discord.ui.Select):
 
 class StatusChoiceView(discord.ui.View):
     def __init__(self, card_id: str, card_name: str):
-        super().__init__(timeout=60)
+        super().__init__(timeout=600)
         self.card_id = card_id
         self.card_name = card_name
 
@@ -1042,7 +1042,7 @@ class StatusChoiceView(discord.ui.View):
 
 class TaskSelectView(discord.ui.View):
     def __init__(self, member: str, cards: list):
-        super().__init__(timeout=60)
+        super().__init__(timeout=600)
         self.add_item(TaskStatusSelect(member=member, cards=cards))
         add_cancel_button(self)
 
@@ -1081,7 +1081,7 @@ class MemberForStatusSelect(discord.ui.Select):
 
 class MemberForStatusView(discord.ui.View):
     def __init__(self, names: list = None):
-        super().__init__(timeout=60)
+        super().__init__(timeout=600)
         self.add_item(MemberForStatusSelect(names))
         add_cancel_button(self)
 
@@ -1155,7 +1155,7 @@ class QuickDoneSelect(discord.ui.Select):
 class QuickDoneView(discord.ui.View):
     def __init__(self, cards: list, persistent: bool = False):
         # ข้อความสาธารณะต้องกดได้ตลอด (persistent) ส่วน /mywork ส่วนตัวหมดอายุใน 2 นาที
-        super().__init__(timeout=None if persistent else 120)
+        super().__init__(timeout=None if persistent else 600)
         if cards:
             self.add_item(QuickDoneSelect(cards))
 
@@ -1536,7 +1536,7 @@ class EditTimeSelectView(discord.ui.View):
     TIMES = ["9:00", "10:00", "12:00", "15:00", "18:00", "23:59"]
 
     def __init__(self, ctx: dict):
-        super().__init__(timeout=120)
+        super().__init__(timeout=600)
         self.ctx = ctx
         for t in self.TIMES:
             self.add_item(self._make_btn(t))
@@ -1582,7 +1582,7 @@ class EditTimeSelectView(discord.ui.View):
 # ── Edit date select ──────────────────────────────────────────────
 class EditDateSelectView(discord.ui.View):
     def __init__(self, ctx: dict):
-        super().__init__(timeout=120)
+        super().__init__(timeout=600)
         self.ctx = ctx
         now = datetime.now(TZ)
         labels = ["วันนี้", "พรุ่งนี้", "+2 วัน", "+3 วัน", "+7 วัน", "ลบกำหนดส่ง"]
@@ -1668,7 +1668,7 @@ class ReassignMemberSelect(discord.ui.Select):
 
 class ReassignMemberView(discord.ui.View):
     def __init__(self, card: dict):
-        super().__init__(timeout=60)
+        super().__init__(timeout=600)
         self.add_item(ReassignMemberSelect(card=card))
         add_cancel_button(self)
 
@@ -1678,7 +1678,7 @@ class ReassignMemberView(discord.ui.View):
 # ── Edit options ──────────────────────────────────────────────────
 class EditOptionsView(discord.ui.View):
     def __init__(self, card: dict):
-        super().__init__(timeout=60)
+        super().__init__(timeout=600)
         self.card = card
 
     async def on_timeout(self):
@@ -1738,7 +1738,7 @@ class EditCardSelect(discord.ui.Select):
 
 class EditCardSelectView(discord.ui.View):
     def __init__(self, cards: list):
-        super().__init__(timeout=60)
+        super().__init__(timeout=600)
         self.add_item(EditCardSelect(cards))
         add_cancel_button(self)
 
@@ -1765,7 +1765,7 @@ class EditMemberSelect(discord.ui.Select):
 
 class EditMemberSelectView(discord.ui.View):
     def __init__(self):
-        super().__init__(timeout=60)
+        super().__init__(timeout=600)
         self.add_item(EditMemberSelect())
         add_cancel_button(self)
 
