@@ -1764,9 +1764,9 @@ class EditMemberSelect(discord.ui.Select):
         )
 
 class EditMemberSelectView(discord.ui.View):
-    def __init__(self):
+    def __init__(self, names: list = None):
         super().__init__(timeout=600)
-        self.add_item(EditMemberSelect())
+        self.add_item(EditMemberSelect(names))
         add_cancel_button(self)
 
     async def on_timeout(self):
